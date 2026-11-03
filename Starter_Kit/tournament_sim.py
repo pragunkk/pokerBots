@@ -1,7 +1,10 @@
 """
 Parallel Tournament Simulator & Benchmarking Harness for Discard Hold'em.
-Runs multi-seed matches between our Adaptive Bot and both the Archetype Zoo
-and the Proven Computer-Poker Algorithm Suite + Self-Play Mirror.
+Runs multi-seed matches between our Adaptive Bot v5 and the complete 20-Bot Championship Suite:
+  - 5 Extreme Heuristic Stress-Test Bots
+  - 5 Proven Computer-Poker Algorithm Bots
+  - 8 Archetype & Rival Meta Bots
+  - 2 Self-Play Evolutionary Mirrors (Adaptive v4 Mirror & Adaptive v3 Mirror)
 """
 
 import os
@@ -86,16 +89,23 @@ def run_suite(hero_bot, opponents, hands_per_match=300, seeds=(101, 202, 303, 40
     )
 
 
-PROVEN_ALGOS_AND_MIRROR = [
+EXTREME_HEURISTICS = [
+    ("Always Fold Heuristic", "example_bots/always_fold_bot.py"),
+    ("Always Call Heuristic", "example_bots/always_call_bot.py"),
+    ("Always All-In Shove Heuristic", "example_bots/always_shove_bot.py"),
+    ("Always Min-Raise Spammer", "example_bots/always_minraise_bot.py"),
+    ("Always 100% Pot-Bet Spammer", "example_bots/always_potbet_bot.py"),
+]
+
+PROVEN_ALGOS = [
     ("CFR Nash Regret-Matching Bot", "example_bots/cfr_nash_bot.py"),
     ("UAlberta EHS & EHS^2 (Poki/Loki)", "example_bots/ehu_sankey_bot.py"),
     ("DeepStack/Pluribus Geometric/Kelly", "example_bots/kelly_pot_geometric_bot.py"),
     ("Bayesian Combinatorial Range Bot", "example_bots/bayesian_range_bot.py"),
     ("Tartanian/Libratus Hybrid + Blocker", "example_bots/uchicago_slumbot_hybrid.py"),
-    ("Self-Play Mirror (Adaptive v3)", "example_bots/adaptive_v3_mirror.py"),
 ]
 
-FULL_ZOO = [
+ARCHETYPE_ZOO = [
     ("Starter Passive Bot", "example_bots/starter_bot.py"),
     ("Random Bot", "example_bots/random_bot.py"),
     ("Calling Station Bot", "example_bots/calling_station_bot.py"),
@@ -104,13 +114,22 @@ FULL_ZOO = [
     ("Deceptive Trapper Bot", "example_bots/trapper_bot.py"),
     ("CFR / GTO Balanced Bot", "example_bots/cfr_gto_bot.py"),
     ("Rival Adaptive Gear-Bot", "example_bots/rival_adaptive_bot.py"),
-] + PROVEN_ALGOS_AND_MIRROR
+]
+
+MIRRORS = [
+    ("Self-Play Mirror (Adaptive v4)", "example_bots/adaptive_v4_mirror.py"),
+    ("Self-Play Mirror (Adaptive v3)", "example_bots/adaptive_v3_mirror.py"),
+]
+
+FULL_20_BOT_SUITE = EXTREME_HEURISTICS + ARCHETYPE_ZOO + PROVEN_ALGOS + MIRRORS
 
 
 if __name__ == "__main__":
-    mode = sys.argv[1] if len(sys.argv) > 1 else "proven"
-    hero = sys.argv[2] if len(sys.argv) > 2 else "adaptive_bot.py"
+    mode = sys.argv[1] if len(sys.argv) > 1 else "full20"
+    hero = sys.argv[2] if len(sys.argv) > 2 else "bot.py"
     if mode == "proven":
-        run_suite(hero, PROVEN_ALGOS_AND_MIRROR, hands_per_match=300, seeds=(101, 202, 303, 404), title="PROVEN ALGORITHMS & SELF-PLAY TEST")
+        run_suite(hero, PROVEN_ALGOS + MIRRORS, hands_per_match=300, seeds=(101, 202, 303, 404), title="PROVEN ALGORITHMS & SELF-PLAY MIRRORS")
+    elif mode == "heuristics":
+        run_suite(hero, EXTREME_HEURISTICS + MIRRORS, hands_per_match=300, seeds=(101, 202, 303, 404), title="EXTREME HEURISTICS & SELF-PLAY MIRRORS")
     else:
-        run_suite(hero, FULL_ZOO, hands_per_match=300, seeds=(101, 202, 303), title="FULL 14-BOT CHAMPIONSHIP SUITE")
+        run_suite(hero, FULL_20_BOT_SUITE, hands_per_match=300, seeds=(101, 202, 303), title="FULL 20-BOT CHAMPIONSHIP SUITE")

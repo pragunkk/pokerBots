@@ -1,7 +1,7 @@
 """
 Ultra-fast Hand Evaluator, Precomputed 1,755 Canonical 3-Card Preflop Evaluator,
-Post-Flop Discard Optimizer, Exact Board-Relative Hand Classifier, Board Texture Danger Analyzer,
-and Bayesian Discard Inference for Discard Hold'em.
+Post-Flop Discard Optimizer, 5-Tier Board-Relative Hand Classifier, Board Texture Danger Analyzer,
+and Bayesian Discard Inference for Discard Hold'em (v5 Championship Engine).
 Uses only Python 3.11 standard library.
 """
 
@@ -48,7 +48,7 @@ def eval5_idx(c0, c1, c2, c3, c4):
         straight_high = 0
         if r0 - r4 == 4:
             straight_high = r0
-        elif r0 == 14 and r1 == 5:
+        elif r0 == r14_check(r0, r1):
             straight_high = 5
 
         if straight_high:
@@ -91,6 +91,10 @@ def eval5_idx(c0, c1, c2, c3, c4):
     if r2 == r3:
         return (1 << 20) | (r2 << 12) | (r0 << 8) | (r1 << 4) | r4
     return (1 << 20) | (r3 << 12) | (r0 << 8) | (r1 << 4) | r2
+
+
+def r14_check(r0, r1):
+    return 14 if (r0 == 14 and r1 == 5) else -1
 
 
 def eval7_idx(cards7):
@@ -154,14 +158,12 @@ def preflop_3card_strength(hole_strs):
 
 def hole_interaction_level(hole_strs, board_strs):
     """
-    Strictly measures how strongly our 2 hole cards interact with the board:
+    Exact Board-Relative Hand Interaction Classifier (v5):
       0 = High card or playing the board / board-only pair(s)
-      1 = Underpair, Bottom Pair, or Middle Pair (only 1 hole card pairs a non-top board card, or pocket pair < top board card)
-      2 = Top Pair (1 hole card pairs the highest board rank) or Pocket Overpair (pocket pair > highest board rank)
-          NOTE: Even if the board has a secondary pair (e.g. Q-Q on 7-7-8-5-4 or A-J on J-7-7-2-2),
-          that is STILL ONLY `inter = 2` (One Hole Pair + Board Pair), NEVER `inter = 3`!
-      3 = True Hole Two Pair (both hole cards pair two distinct board ranks) or Trips/Set (using at least 1 hole card)
-      4 = Straight, Flush, Full House (where hole cards provide a set/two-pair/over-full-house), or Quads+
+      1 = Underpair, Bottom Pair, or Middle Pair
+      2 = Top Pair (1 hole card pairs highest board rank) or Pocket Overpair (even on a paired board!)
+      3 = True Hole Two Pair (both hole cards pair two distinct board ranks) OR 1-Card Trips (1 hole card matches paired board)
+      4 = Pocket Set (pocket pair hitting a board card), Straight, Flush, Full House (using hole cards), or Quads+
     """
     full_score = eval_cards(hole_strs, board_strs)
     cat = full_score >> 20
@@ -173,65 +175,73 @@ def hole_interaction_level(hole_strs, board_strs):
     b_counts = Counter(board_ranks)
     max_board_rank = board_ranks[0]
 
-    # Check if the board alone achieves the same category & primary rank
     if len(board_strs) == 5:
         board_only_score = eval_cards([], board_strs)
         if (full_score >> 8) == (board_only_score >> 8):
             return 0
 
-    # Category 4, 5, 7, 8 (Straight, Flush, Quads, Straight Flush)
     if cat in (4, 5, 7, 8):
         return 4
 
-    # Category 6 (Full House)
     if cat == 6:
         trips_rank = (full_score >> 4) & 0xF
         pair_rank = full_score & 0xF
-        # Did our hole cards contribute to the trips, or make a pocket pair above the board?
         if trips_rank in hole_ranks:
             return 4
         if hole_ranks[0] == hole_ranks[1] and hole_ranks[0] == pair_rank:
             return 3 if pair_rank > max_board_rank else 2
-        if pair_rank in hole_ranks and b_counts[pair_rank] == 1:
+        if pair_rank in hole_ranks and b_counts.get(pair_rank, 0) == 1:
             return 3 if pair_rank == max_board_rank else 2
         return 0
 
-    # Category 3 (Three of a kind / Trips / Set)
     if cat == 3:
         trips_rank = (full_score >> 8) & 0xF
         if trips_rank in hole_ranks:
             return 3
         return 0
 
-    # Category 2 (Two Pair)
     if cat == 2:
-        # Distinguish TRUE two-hole-card two pair from "One Hole Pair + One Board Pair"
-        # Count how many distinct non-paired board ranks our hole cards match
         matched_unpaired_board = sum(1 for hr in set(hole_ranks) if b_counts.get(hr, 0) == 1)
         if matched_unpaired_board >= 2:
-            # Both of our hole cards paired two distinct board cards!
             return 3
-        # Otherwise, the board itself is paired (or double-paired)!
-        # Check what single pair our hole cards actually contribute:
         if hole_ranks[0] == hole_ranks[1]:
             if hole_ranks[0] > max_board_rank:
-                return 2  # Pocket Overpair on a paired board
-            return 1  # Pocket Underpair on a paired board
+                return 2
+            return 1
         if matched_unpaired_board == 1:
             matched_r = max(hr for hr in hole_ranks if b_counts.get(hr, 0) == 1)
             if matched_r >= max_board_rank:
-                return 2  # Top Pair on a paired board
-            return 1  # Middle/Bottom Pair on a paired board
-        return 0  # Both pairs are on the board!
+                return 2
+            return 1
+        return 0
 
     # Category 1 (One Pair)
     if b_counts.get((full_score >> 12) & 0xF, 0) >= 2:
-        # The pair is on the board! Our hole cards are just high-card kickers!
         return 0
     pair_rank = (full_score >> 12) & 0xF
     if pair_rank >= max_board_rank:
-        return 2  # Top Pair or Overpair
-    return 1  # Underpair or Middle/Bottom Pair
+        return 2
+    return 1
+
+
+def has_strong_draw(hole_strs, board_strs):
+    """Returns True if hole_strs + board_strs has a 4-flush or 4-straight draw on Flop/Turn."""
+    if len(board_strs) >= 5:
+        return False
+    all_c = list(hole_strs) + list(board_strs)
+    suits = [c[1] for c in all_c]
+    for s in "shdc":
+        if suits.count(s) >= 4 and any(c[1] == s for c in hole_strs):
+            return True
+    ranks = sorted(set(RANK_VAL[c[0]] for c in all_c))
+    if 14 in ranks:
+        ranks = [1] + ranks
+    hole_r = {RANK_VAL[c[0]] for c in hole_strs}
+    for i in range(len(ranks)):
+        window = [r for r in ranks if 0 <= r - ranks[i] <= 4]
+        if len(window) >= 4 and any(hr in window for hr in hole_r):
+            return True
+    return False
 
 
 def board_danger_level(board_strs):
@@ -253,7 +263,6 @@ def board_danger_level(board_strs):
     elif max_suit == 3:
         danger += 0.25
 
-    # Check max connected ranks within a 5-rank window
     max_conn = 1
     for i in range(len(ranks)):
         cnt = sum(1 for r in ranks if 0 <= r - ranks[i] <= 4)
@@ -274,8 +283,9 @@ def evaluate_discard_options(hole3_strs, flop3_strs, num_rollouts=90, opp_vpip=0
     """
     Evaluates all 3 flop discard choices, combining:
       1. Expected Showdown Equity against opponent's VPIP-filtered range and optimal discard
-      2. Nut-Potential ($P_{pot}$ / $EHS^2$) Implied-Odds Bonus: rewards keeping pairs of cards
-         that make Monster hands (Straights, Flushes, Sets, Full Houses) on Turn/River!
+      2. Nut-Potential ($P_{pot}$) Implied-Odds Bonus
+      3. Current Flop Made-Hand & Kicker Tie-Breaker (ensuring we NEVER break a higher pocket pair `6-6`
+         for a lower pair `4-4` or throw away an Ace/King kicker due to MC rollout noise!)
     """
     hole_idxs = [CARD_IDX[c] for c in hole3_strs]
     flop_idxs = [CARD_IDX[c] for c in flop3_strs]
@@ -330,11 +340,13 @@ def evaluate_discard_options(hole3_strs, flop3_strs, num_rollouts=90, opp_vpip=0
                 wins[idx] += 0.5 * w
 
     equities = {options[i][0]: wins[i] / max(total_w, 1e-9) for i in range(3)}
-    # Combine raw equity with a 4% implied-odds bonus for nut-making potential (sets/straights/flushes)
-    scores = [
-        (wins[i] + 0.04 * nut_hits[i]) / max(total_w, 1e-9)
-        for i in range(3)
-    ]
+    scores = []
+    for i in range(3):
+        k0, k1 = options[i][1]
+        flop_now = eval5_idx(k0, k1, b0, b1, b2)
+        # Deterministic flop made-hand + kicker tie-breaker prevents MC noise from breaking higher pairs or kickers
+        flop_tiebreak = (flop_now >> 12) * 0.00015 + (CARD_RANK[k0] + CARD_RANK[k1]) * 0.0004
+        scores.append((wins[i] + 0.035 * nut_hits[i]) / max(total_w, 1e-9) + flop_tiebreak)
     best_i = max(range(3), key=lambda i: scores[i])
     return options[best_i][0], equities[options[best_i][0]], equities
 

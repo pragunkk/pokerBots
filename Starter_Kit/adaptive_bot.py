@@ -1,22 +1,23 @@
 """
-Adaptive Meta-Strategy Bot v4 (Championship Engine with Novel Discard Hold'em Exploits).
-Novel Innovations over v3:
-1. Exact Paired-Board Interaction & Board Texture Danger Filter (`hole_interaction_level` + `board_danger_level`):
-   - Eliminates the paired-board illusion (never treats Top Pair/Overpair + Board Pair as Two Pair!).
-   - Discounts vulnerable 1-pair and bare 2-pair hands when facing large Turn/River bets on wet (3/4-flush, 4-straight) boards.
-2. Continuous Bluff-Index & River-Barrel Verification (Fixes False-Maniac Classification):
-   - Distinguishes wide preflop/flop value-betting bots (like Kelly/Geometric, GTO, and v3 Mirror) from true
-     3-street Maniacs by requiring high postflop aggression (> 1.15/hand), high 3-bet rate (> 20%), OR
-     confirmed showdown bluffs before calling big Turn/River overbets with One Pair.
-3. Bet-Size-Specific Fold Curve & Asymmetric Sizing Exploit:
-   - Uses Small-Ball Probe Bets (`0.35x` pot) for bluffs/probes to fold out equity-threshold bots at nearly
-     half the cost, while using Geometric Overbet/Large Value Sizing (`0.72x–1.05x` pot) with nutted hands (`inter >= 3`).
-4. Capped-Range Delayed Turn/River Float (`META_HUNTER` Exploit):
-   - Detects when a balanced/GTO/adaptive opponent checks twice (capping their range below Top Pair)
-     and steals the pot with opportunistic `0.42x` pot probe bets.
-5. Active Reverse-Discard Signaling:
-   - Disguises monsters (`eq > 0.74`) by discarding low trash cards, and projects phantom strength on
-     medium/semi-bluff hands by discarding high redundant face cards (`J, Q, K`) when within 1.0% equity.
+Adaptive Meta-Strategy Bot v5 (Championship Engine for Discard Hold'em).
+Upgrades in v5 over v4:
+1. Extreme Heuristic & Boundary Exploiter:
+   - Auto-Steal vs Extreme Folders (`fold_to_steal > 0.62` or `fold_to_bet > 0.68`): Opens 100% of Buttons
+     to `4` (min-raise) and fires 100% min-probe continuation bets (`+450/450` theoretical max vs Always-Fold!).
+   - Anti-Shove-Spammer Shield (`preflop_shove_rate > 0.25`): Never open-raises medium hands (`< 0.57`)
+     on the Button only to fold to an automatic 200-chip shove (saving 4–5 chips per hand!), and calls
+     shoves with the exact `+EV` dominating range (`strength >= 0.57`) without `PROTECT_WIN` over-folding!
+2. Deterministic Flop Made-Hand & Kicker Protection in Discards:
+   - Uses deterministic flop made-hand + kicker tie-breaking in `evaluate_discard_options` and preserves
+     Ace/King kickers in `choose_discard` so MC rollout noise never breaks higher pairs (`6-6` vs `4-4`).
+3. Turn Unimproved Air Guard (`inter == 0` and `not has_draw`):
+   - Blocks calling Turn bets (`>= 28%` pot) with unimproved High Card / board-only pairs (`inter == 0`)
+     when holding no 4-flush or 4-straight draw.
+4. Asymmetric River Bluff & Bluff-Catch Thresholds (`META_HUNTER` v5 Exploit):
+   - Sizes capped-range river bluffs (`inter == 0, eq < 0.28` after Turn check-through) at `int(pot * 0.38) + 1`
+     (`> 26%` of new pot) to force threshold bots (including v4) to fold `inter <= 1`, while defending
+     our own `inter == 1` hands against checked-through river probes up to `33%` of new pot (`0.49x` pot)
+     to snap off opponent `0.35x-0.42x` river bluffs!
 """
 
 import json
@@ -28,6 +29,7 @@ from fast_eval import (
     board_danger_level,
     eval_cards,
     evaluate_discard_options,
+    has_strong_draw,
     hole_interaction_level,
     post_discard_equity,
     preflop_3card_strength,
@@ -48,6 +50,9 @@ class OpponentProfile:
         self.vpip_hands = 0
         self.pfr_hands = 0
         self.three_bets = 0
+        self.preflop_shoves = 0
+        self.faced_preflop_steal = 0
+        self.folded_to_preflop_steal = 0
 
         self.postflop_bets_raises = 0
         self.postflop_calls_checks = 0
@@ -69,6 +74,7 @@ class OpponentProfile:
     def reset_hand_flags(self):
         self.hand_vpip = 0
         self.hand_pfr = 0
+        self.hand_shoved_pre = 0
         self.hand_agg = 0
         self.hand_pass = 0
         self.hand_folded = 0
@@ -78,6 +84,8 @@ class OpponentProfile:
         self.hand_bet_river = False
         self.opp_checked_this_street = False
         self.me_bet_this_street = False
+        self.me_opened_preflop = False
+        self.opp_responded_to_open = False
         self.last_street_tracked = "preflop"
         self.processed_history_len = 0
 
@@ -114,6 +122,7 @@ class OpponentProfile:
             street = entry["street"]
             actor = entry["actor"]
             action = entry["action"]
+            amount = entry.get("amount", 0) or 0
 
             if street == "river":
                 self.hand_saw_river = True
@@ -125,6 +134,11 @@ class OpponentProfile:
 
             if actor == "opp":
                 if street == "preflop":
+                    if self.me_opened_preflop and not self.opp_responded_to_open:
+                        self.opp_responded_to_open = True
+                        self.faced_preflop_steal += 1
+                        if action == "fold":
+                            self.folded_to_preflop_steal += 1
                     if action in ("call", "raise") and not self.hand_vpip:
                         self.hand_vpip = 1
                         self.vpip_hands += 1
@@ -132,6 +146,9 @@ class OpponentProfile:
                         if not self.hand_pfr:
                             self.hand_pfr = 1
                             self.pfr_hands += 1
+                        if amount >= 50 and not self.hand_shoved_pre:
+                            self.hand_shoved_pre = 1
+                            self.preflop_shoves += 1
                         if preflop_raises_seen >= 1:
                             self.three_bets += 1
                         preflop_raises_seen += 1
@@ -159,6 +176,8 @@ class OpponentProfile:
 
             elif actor == "me":
                 if street == "preflop" and action == "raise":
+                    if preflop_raises_seen == 0:
+                        self.me_opened_preflop = True
                     preflop_raises_seen += 1
                 elif street != "preflop" and action == "raise":
                     self.faced_bet_postflop += 1
@@ -188,6 +207,14 @@ class OpponentProfile:
         return g
 
     @property
+    def fold_to_steal(self):
+        return (self.folded_to_preflop_steal + 2.0) / (self.faced_preflop_steal + 5.0)
+
+    @property
+    def preflop_shove_rate(self):
+        return self.preflop_shoves / max(1.0, float(self.hands_seen))
+
+    @property
     def fold_to_bet(self):
         g = (self.folded_to_bet_postflop + 4.0) / (self.faced_bet_postflop + 10.0)
         if len(self.recent_window) >= 18:
@@ -214,13 +241,13 @@ class OpponentProfile:
         return (self.showdown_bluffs + 0.4) / (self.showdowns + 3.5)
 
     def classify(self):
-        if self.hands_seen < 12:
+        if self.hands_seen < 8:
             return "BALANCED"
 
-        # True Maniac: requires genuine multi-street barrel mania or 3-bet mania, NOT just standard button opens!
         three_bet_rate = self.three_bets / max(1, self.hands_seen)
         if (
-            self.postflop_agg_per_hand > 1.15
+            self.preflop_shove_rate > 0.25
+            or self.postflop_agg_per_hand > 1.15
             or three_bet_rate > 0.22
             or (self.pfr > 0.62 and self.postflop_agg_per_hand > 0.90)
             or (self.showdowns >= 4 and self.showdown_bluff_rate > 0.42 and self.postflop_agg_per_hand > 0.75)
@@ -233,7 +260,7 @@ class OpponentProfile:
         if self.fold_to_bet < 0.28 and self.vpip > 0.58 and self.postflop_agg_per_hand < 0.45:
             return "CALLING_STATION"
 
-        if self.vpip < 0.45 or self.fold_to_bet > 0.47:
+        if self.vpip < 0.45 or self.fold_to_bet > 0.47 or self.fold_to_steal > 0.62:
             return "NIT_TAG"
 
         return "BALANCED"
@@ -288,7 +315,6 @@ class AdaptiveBot:
         hist = msg.get("history", [])
         self.opp.observe_history(hist)
         if msg.get("result") == "showdown" and msg.get("opp_hole_cards"):
-            # Only count as a showdown bluff if opponent actually bet or raised on Turn or River with inter <= 1!
             opp_bet_late = any(
                 h["actor"] == "opp" and h["street"] in ("turn", "river") and h["action"] == "raise"
                 for h in hist
@@ -323,17 +349,6 @@ class AdaptiveBot:
                 hole, board, num_rollouts=rollouts, opp_vpip=self.opp.vpip
             )
 
-        # Active Reverse-Discard Signaling:
-        # Within 1.0% equity:
-        # - If holding a monster (best_eq > 0.72), discard our LOWEST card so opponent doesn't put us on a monster
-        # - If holding a medium/semi-bluff hand, discard our HIGHEST redundant card to project phantom strength!
-        close_cards = [c for c, eq in eq_map.items() if best_eq - eq <= 0.010]
-        if len(close_cards) > 1:
-            if best_eq > 0.72:
-                best_card = min(close_cards, key=lambda c: RANK_VAL[c[0]])
-            else:
-                best_card = max(close_cards, key=lambda c: RANK_VAL[c[0]])
-
         return {"type": "discard", "card": best_card}
 
     def choose_action(self, req):
@@ -365,6 +380,25 @@ class AdaptiveBot:
         my_bet = req["my_bet"]
         strength = preflop_3card_strength(self.hole3)
 
+        # Special Case 1: Opponent is a Preflop All-In Shove Spammer (`preflop_shove_rate > 0.25`)
+        if self.opp.hands_seen >= 6 and self.opp.preflop_shove_rate > 0.25:
+            shove_call_t = 0.57
+            if strength >= shove_call_t:
+                if "raise" in legal and strength >= 0.72:
+                    return {"type": "action", "action": "raise", "amount": req["max_raise"]}
+                if "call" in legal and to_call > 0:
+                    return {"type": "action", "action": "call"}
+                if "raise" in legal:
+                    return {"type": "action", "action": "raise", "amount": min(req["max_raise"], 6)}
+            if to_call == 0:
+                return {"type": "action", "action": "check"}
+            return {"type": "action", "action": "fold"}
+
+        # Special Case 2: Opponent is an Extreme Preflop Folder (`fold_to_steal > 0.62`)
+        if self.opp.hands_seen >= 8 and self.opp.fold_to_steal > 0.62 and opp_bet <= 2:
+            if "raise" in legal:
+                return {"type": "action", "action": "raise", "amount": req["min_raise"]}
+
         open_thresh = 0.32
         limp_thresh = 0.21
         call_raise_thresh = 0.43
@@ -392,7 +426,6 @@ class AdaptiveBot:
 
         if opp_bet <= 2:
             if strength >= open_thresh and "raise" in legal:
-                # Use 5-chip min-plus open with steals/medium hands (risking 4 to win 3) and 6-7 with premiums!
                 if archetype == "CALLING_STATION" and strength > 0.60:
                     size = 7
                 elif strength >= 0.56:
@@ -412,7 +445,7 @@ class AdaptiveBot:
 
         if opp_bet >= 35:
             req_s = 0.76 if archetype != "MANIAC" else 0.62
-            if risk_mode == "PROTECT_WIN":
+            if risk_mode == "PROTECT_WIN" and self.opp.preflop_shove_rate < 0.15:
                 req_s = max(req_s, 0.82)
             if strength >= req_s:
                 if strength >= 0.85 and "raise" in legal:
@@ -428,8 +461,6 @@ class AdaptiveBot:
                 return {"type": "action", "action": "call"}
             return {"type": "action", "action": "fold"}
 
-        # Facing a 3-bet from a non-Maniac (my_bet >= 5, opp_bet >= 14):
-        # Flat-call in position with playable hands (0.48+) to see the 3-card flop cheaply, 4-bet only 0.82+!
         if my_bet >= 5 and opp_bet >= 14:
             if strength >= 0.82 and "raise" in legal:
                 target = min(req["max_raise"], max(req["min_raise"], opp_bet * 3))
@@ -458,7 +489,6 @@ class AdaptiveBot:
         eff_stack = min(req["my_stack"], req["opp_stack"])
         hist = req.get("history", [])
 
-        # Calculate equity, exact hole_interaction_level, and board_danger_level
         if street == "flop":
             if self.cached_flop_eq is None:
                 rollouts = 80 if time_left > 15000 else 40
@@ -472,6 +502,7 @@ class AdaptiveBot:
             keep2 = [c for c in self.hole3 if c != self.cached_flop_discard][:2]
             inter = hole_interaction_level(keep2, board)
             full_cat = eval_cards(keep2, board) >> 20
+            has_draw = has_strong_draw(keep2, board)
         else:
             rollouts = 100 if time_left > 15000 else 45
             if archetype == "MANIAC":
@@ -491,8 +522,13 @@ class AdaptiveBot:
             )
             inter = hole_interaction_level(self.hole2, board)
             full_cat = eval_cards(self.hole2, board) >> 20
+            has_draw = has_strong_draw(self.hole2, board)
 
-            if self.opp_discard and to_call > 0 and archetype not in ("MANIAC",):
+            opp_deceptive_discards = (
+                self.opp.total_discards >= 8
+                and (self.opp.high_card_discards / self.opp.total_discards) > 0.22
+            )
+            if self.opp_discard and to_call > 0 and archetype not in ("MANIAC",) and not opp_deceptive_discards:
                 disc_r = RANK_VAL[self.opp_discard[0]]
                 if disc_r >= 12:
                     eq *= 0.95
@@ -507,7 +543,6 @@ class AdaptiveBot:
         else:
             eq_adj = eq
 
-        # Street history analysis
         prev_street = {"flop": "preflop", "turn": "flop", "river": "turn"}[street]
         prev_acts = [h for h in hist if h["street"] == prev_street]
         prev_raises = [h for h in prev_acts if h["action"] == "raise"]
@@ -521,11 +556,15 @@ class AdaptiveBot:
             if "raise" not in legal:
                 return {"type": "action", "action": "check"}
 
-            # 1. Do not "donk-bet" into the previous street's raiser on Turn/River without Two Pair+ (inter >= 3)
+            if self.opp.hands_seen >= 10 and self.opp.fold_to_bet > 0.68:
+                amt = max(req["min_raise"], min(req["max_raise"], int(pot * 0.30)))
+                return {"type": "action", "action": "raise", "amount": amt}
+
+            # Rule 1: Do not "donk-bet" into the previous street's raiser on Turn/River without Two Pair+ (`inter >= 3`)
             if street in ("turn", "river") and opp_was_prev_aggressor and inter < 3 and eq_adj < 0.78:
                 return {"type": "action", "action": "check"}
 
-            # 2. Against a MANIAC: check-call medium hands on Flop/Turn to let them bluff; bet big with monsters
+            # Rule 2: Against a MANIAC, check-call medium hands on Flop/Turn so they bluff into us; bet big with monsters
             if archetype == "MANIAC":
                 if street in ("flop", "turn") and 0.48 <= eq_adj <= 0.75:
                     return {"type": "action", "action": "check"}
@@ -535,9 +574,10 @@ class AdaptiveBot:
                     return {"type": "action", "action": "raise", "amount": target}
                 return {"type": "action", "action": "check"}
 
-            # 3. Pot-control weak/underpairs (`inter <= 1`) on Turn & River!
+            # Rule 3: Pot-control weak/underpairs (`inter <= 1`) on Turn & River!
             if street == "river" and inter <= 1 and eq_adj < 0.74:
-                # Capped-Range River Bluff Exploit: if opponent checked Flop/Turn AND River, and we have air (inter == 0)
+                # Capped-Range River Bluff Exploit: only bluff with `inter == 0` (0% showdown value),
+                # sized at `int(pot * 0.38) + 1` so `to_call > new_pot * 0.26` forces v4/GTO to fold `inter <= 1`!
                 if (
                     inter == 0
                     and eq_adj < 0.28
@@ -545,18 +585,15 @@ class AdaptiveBot:
                     and archetype not in ("CALLING_STATION", "MANIAC")
                     and risk_mode != "PROTECT_WIN"
                 ):
-                    if random.random() < 0.42:
-                        # Small-ball 0.42x pot steal against capped range!
-                        target = max(req["min_raise"], min(req["max_raise"], int(pot * 0.42)))
+                    if random.random() < 0.45:
+                        target = max(req["min_raise"], min(req["max_raise"], int(pot * 0.38) + 1))
                         return {"type": "action", "action": "raise", "amount": target}
                 return {"type": "action", "action": "check"}
 
             if street == "turn" and inter == 1 and eq_adj < 0.66:
                 return {"type": "action", "action": "check"}
 
-            # 4. Asymmetric Value Sizing:
-            # - Nutted hands (inter >= 3 and eq_adj >= 0.74): use Geometric Pot-Growth / Big Value Sizing!
-            # - Top Pair / Overpair (inter == 2): use medium 0.52x-0.60x sizing (or check-control on super wet river)
+            # Rule 4: Asymmetric Value Sizing:
             if inter >= 3 and eq_adj >= 0.72:
                 streets_left = {"flop": 3, "turn": 2, "river": 1}[street]
                 geo_frac = geometric_bet_fraction(pot, eff_stack, streets_left)
@@ -573,19 +610,15 @@ class AdaptiveBot:
                 val_thresh = 0.62
 
             if eq_adj >= val_thresh:
-                # On a super dangerous river (3/4-flush or 4-straight, danger >= 0.55), check back vulnerable 1-pair if eq < 0.66
                 if street == "river" and inter == 2 and danger >= 0.55 and eq_adj < 0.66 and archetype != "CALLING_STATION":
                     return {"type": "action", "action": "check"}
                 frac = 0.65 if archetype == "CALLING_STATION" else 0.52
                 target = max(req["min_raise"], min(req["max_raise"], int(pot * frac)))
                 return {"type": "action", "action": "raise", "amount": target}
 
-            # 5. Small-Ball Probe & Delayed Turn Float (`META_HUNTER` Exploit):
-            # - On the Flop: fire a cheap `0.36x` pot probe c-bet with semi-bluffs (0.38 <= eq_adj < val_thresh)
-            # - On the Turn after a Flop check-through (`prev_checked_through`): opponent's range is capped!
-            #   Fire a `0.40x` pot Delayed Turn Float to fold out GTO/Bayesian/v3 Mirror bots!
+            # Rule 5: Small-Ball Probe & Delayed Turn Float (`META_HUNTER` Exploit)
             bluff_freq = 0.0
-            probe_frac = 0.38
+            probe_frac = 0.42
             if street == "flop" and 0.38 <= eq_adj < val_thresh and archetype not in ("CALLING_STATION", "MANIAC"):
                 bluff_freq = 0.52 if archetype == "NIT_TAG" else 0.36
                 probe_frac = 0.36
@@ -596,7 +629,7 @@ class AdaptiveBot:
                 and archetype not in ("CALLING_STATION", "MANIAC")
             ):
                 bluff_freq = 0.48 if archetype == "NIT_TAG" else 0.38
-                probe_frac = 0.40
+                probe_frac = 0.42
 
             if risk_mode == "PROTECT_WIN":
                 bluff_freq *= 0.25
@@ -621,6 +654,7 @@ class AdaptiveBot:
         opp_raised_our_bet = my_bet > 0 and opp_bet > my_bet
         bet_to_pot_ratio = to_call / max(1.0, pot - to_call)
 
+
         # 1. Counter-Maniac Call-Down & Trap Engine
         if archetype == "MANIAC":
             if eq_adj >= 0.80 and inter >= 3 and "raise" in legal:
@@ -639,57 +673,62 @@ class AdaptiveBot:
 
         # 2. Facing a Postflop Raise Over Our Bet (opp_raised_our_bet) or Check-Raise against a Non-Maniac:
         if opp_raised_our_bet or opp_check_raised:
-            # Only 3-bet a postflop street with a true monster (inter >= 3 and eq_adj >= 0.84, or inter == 4)
-            if ((inter == 4 and eq_adj >= 0.80) or (inter >= 3 and eq_adj >= 0.85 and danger < 0.50)) and "raise" in legal:
+            # Only 3-bet a postflop street with a True Monster (`inter == 4`: Pocket Set, Straight, Flush, Full House)
+            # or Top Two Pair on a dry flop/turn (`inter >= 3, eq_adj >= 0.85, danger < 0.40, street != 'river'`)!
+            if (
+                (inter == 4 and eq_adj >= 0.80)
+                or (street != "river" and inter >= 3 and eq_adj >= 0.85 and danger < 0.45)
+            ) and "raise" in legal:
                 target = opp_bet + int((pot + to_call) * 0.75)
                 amt = max(req["min_raise"], min(req["max_raise"], target))
                 return {"type": "action", "action": "raise", "amount": amt}
 
-            # On Turn or River, if we only have One Pair or worse (inter <= 2), fold to a raise
-            # unless pot odds are tiny (<= 0.20)!
             if street in ("turn", "river") and inter <= 2:
                 if inter == 2 and pot_odds <= 0.20 and eq_adj >= 0.62:
                     return {"type": "action", "action": "call"}
                 return {"type": "action", "action": "fold"}
 
-            # Even with bare Two Pair (inter == 3, full_cat == 2) on Turn/River, if a non-Maniac raises us huge
-            # on a dangerous board or 3-bets our Turn raise, do not re-raise—and fold if eq_adj < 0.68!
             if street in ("turn", "river") and inter == 3 and full_cat == 2:
                 if eq_adj < 0.66 or (danger >= 0.50 and eq_adj < 0.72):
                     return {"type": "action", "action": "fold"}
                 return {"type": "action", "action": "call"}
 
-            if street == "flop" and inter <= 1 and eq_adj < 0.60:
+            if street in ("turn", "river") and inter == 3 and full_cat == 3:
+                # 1-Card Trips facing a big raise on River: call (never 3-bet jam into better kicker/full house!)
+                if eq_adj < 0.60:
+                    return {"type": "action", "action": "fold"}
+                return {"type": "action", "action": "call"}
+
+            if street == "flop" and inter <= 1 and not has_draw and eq_adj < 0.60:
                 return {"type": "action", "action": "fold"}
 
             eq_adj -= 0.07
 
-        # 3. Structural Defense Against Big Turn & River Bets / Overbets (Geometric / Kelly / Bayesian Counter):
+        # 3. Structural Defense Against Big Turn & River Bets / Overbets:
         if street == "river":
-            # Never call a river bet > 16% pot with High Card / Board-Only Pair (inter == 0)
             if inter == 0 and to_call > pot * 0.16:
                 return {"type": "action", "action": "fold"}
-            # Never call a river bet > 28% pot with Underpair / Weak Pair (inter == 1)
-            if inter == 1 and (to_call > pot * 0.26 or opp_was_prev_aggressor) and eq_adj < 0.68:
+            # Asymmetric River Defense:
+            # If the Turn checked through (`prev_checked_through`), opponents (including v4) bluff up to `0.42 * P_0` (`0.30 * pot`).
+            # So when `prev_checked_through` is True, only fold `inter == 1` if `to_call > pot * 0.33`!
+            inter1_lim = 0.33 if prev_checked_through else 0.26
+            if inter == 1 and (to_call > pot * inter1_lim or opp_was_prev_aggressor) and eq_adj < 0.68:
                 return {"type": "action", "action": "fold"}
-            # Facing a River Overbet or Near-Pot Bomb (bet_to_pot_ratio >= 0.72, e.g. Kelly Geometric 140 into 110):
-            # Non-maniac bots only fire river bombs >= 72% pot with Two Pair+, Sets, Straights, or Flushes!
             if bet_to_pot_ratio >= 0.72 and self.opp.river_barrel_rate < 0.48:
                 if inter <= 2 and eq_adj < 0.74:
                     return {"type": "action", "action": "fold"}
                 if inter == 3 and full_cat == 2 and danger >= 0.40 and eq_adj < 0.75:
-                    # Bare two pair facing a river overbet on a 4-straight / 3-flush / paired board
                     return {"type": "action", "action": "fold"}
 
         if street == "turn":
+            if inter == 0 and not has_draw and bet_to_pot_ratio >= 0.28 and eq_adj < 0.58:
+                return {"type": "action", "action": "fold"}
             if inter == 1 and (bet_to_pot_ratio >= 0.55 or opp_was_prev_aggressor) and eq_adj < 0.64:
                 return {"type": "action", "action": "fold"}
-            # Facing a Turn Overbet (bet_to_pot_ratio >= 0.80) with bare One Pair (inter <= 2) and no redraw:
             if bet_to_pot_ratio >= 0.80 and inter <= 2 and eq_adj < 0.68:
                 return {"type": "action", "action": "fold"}
 
         # 4. Raise for Value (when facing an opening bet, my_bet == 0)
-        # Only raise a postflop bet with Sets/Straights/Flushes (`full_cat >= 3`) or strong Two Pair (`inter >= 3, eq_adj >= 0.78`)
         raise_val_thresh = 0.77
         if archetype == "CALLING_STATION":
             raise_val_thresh = 0.74
