@@ -1,7 +1,7 @@
 """
 Ultra-fast Hand Evaluator, Precomputed 1,755 Canonical 3-Card Preflop Evaluator,
-Post-Flop Discard Optimizer, 5-Tier Board-Relative Hand Classifier, Board Texture Danger Analyzer,
-and Bayesian Discard Inference for Discard Hold'em (v5 Championship Engine).
+Post-Flop Discard Optimizer, Exact Zero-Variance Combinatorial River Solver,
+Pre-Evaluated Turn Rollout Engine, and Board Texture Danger Analyzer (v6 Championship Engine).
 Uses only Python 3.11 standard library.
 """
 
@@ -48,7 +48,7 @@ def eval5_idx(c0, c1, c2, c3, c4):
         straight_high = 0
         if r0 - r4 == 4:
             straight_high = r0
-        elif r0 == r14_check(r0, r1):
+        elif r0 == 14 and r1 == 5:
             straight_high = 5
 
         if straight_high:
@@ -91,10 +91,6 @@ def eval5_idx(c0, c1, c2, c3, c4):
     if r2 == r3:
         return (1 << 20) | (r2 << 12) | (r0 << 8) | (r1 << 4) | r4
     return (1 << 20) | (r3 << 12) | (r0 << 8) | (r1 << 4) | r2
-
-
-def r14_check(r0, r1):
-    return 14 if (r0 == 14 and r1 == 5) else -1
 
 
 def eval7_idx(cards7):
@@ -158,12 +154,12 @@ def preflop_3card_strength(hole_strs):
 
 def hole_interaction_level(hole_strs, board_strs):
     """
-    Exact Board-Relative Hand Interaction Classifier (v5):
+    Board-Relative Hand Interaction Classifier:
       0 = High card or playing the board / board-only pair(s)
       1 = Underpair, Bottom Pair, or Middle Pair
       2 = Top Pair (1 hole card pairs highest board rank) or Pocket Overpair (even on a paired board!)
-      3 = True Hole Two Pair (both hole cards pair two distinct board ranks) OR 1-Card Trips (1 hole card matches paired board)
-      4 = Pocket Set (pocket pair hitting a board card), Straight, Flush, Full House (using hole cards), or Quads+
+      3 = True Hole Two Pair (both hole cards pair two distinct board ranks) OR Trips/Set (using hole card)
+      4 = Straight, Flush, Full House (using hole cards), or Quads+
     """
     full_score = eval_cards(hole_strs, board_strs)
     cat = full_score >> 20
@@ -215,7 +211,6 @@ def hole_interaction_level(hole_strs, board_strs):
             return 1
         return 0
 
-    # Category 1 (One Pair)
     if b_counts.get((full_score >> 12) & 0xF, 0) >= 2:
         return 0
     pair_rank = (full_score >> 12) & 0xF
@@ -279,13 +274,12 @@ def board_danger_level(board_strs):
     return min(1.0, danger)
 
 
-def evaluate_discard_options(hole3_strs, flop3_strs, num_rollouts=90, opp_vpip=0.65):
+def evaluate_discard_options(hole3_strs, flop3_strs, num_rollouts=95, opp_vpip=0.65):
     """
     Evaluates all 3 flop discard choices, combining:
       1. Expected Showdown Equity against opponent's VPIP-filtered range and optimal discard
       2. Nut-Potential ($P_{pot}$) Implied-Odds Bonus
-      3. Current Flop Made-Hand & Kicker Tie-Breaker (ensuring we NEVER break a higher pocket pair `6-6`
-         for a lower pair `4-4` or throw away an Ace/King kicker due to MC rollout noise!)
+      3. Deterministic Flop Made-Hand & Kicker Tie-Breaker
     """
     hole_idxs = [CARD_IDX[c] for c in hole3_strs]
     flop_idxs = [CARD_IDX[c] for c in flop3_strs]
@@ -344,18 +338,89 @@ def evaluate_discard_options(hole3_strs, flop3_strs, num_rollouts=90, opp_vpip=0
     for i in range(3):
         k0, k1 = options[i][1]
         flop_now = eval5_idx(k0, k1, b0, b1, b2)
-        # Deterministic flop made-hand + kicker tie-breaker prevents MC noise from breaking higher pairs or kickers
         flop_tiebreak = (flop_now >> 12) * 0.00015 + (CARD_RANK[k0] + CARD_RANK[k1]) * 0.0004
         scores.append((wins[i] + 0.035 * nut_hits[i]) / max(total_w, 1e-9) + flop_tiebreak)
     best_i = max(range(3), key=lambda i: scores[i])
     return options[best_i][0], equities[options[best_i][0]], equities
 
 
-def post_discard_equity(hole2_strs, board_strs, my_discard_str, opp_discard_str,
-                        opp_range_bias=0.0, num_rollouts=120):
+def exact_river_equity(hole_idxs, board_idxs, rem_deck, opp_disc_idx, opp_range_bias=0.0):
     """
-    Calculates Monte Carlo equity on Turn (4 board cards) or River (5 board cards)
-    after the discard phase has occurred.
+    Zero-Variance Combinatorial Enumeration over opponent 2-card hands on the River!
+    Precomputes single-card flop-discard scores in 43 calls and my_score in 1 call.
+    """
+    n_rem = len(rem_deck)
+    b0, b1, b2, b3, b4 = board_idxs[0], board_idxs[1], board_idxs[2], board_idxs[3], board_idxs[4]
+    my_score = eval7_idx((hole_idxs[0], hole_idxs[1], b0, b1, b2, b3, b4))
+
+    opp_disc_rank = CARD_RANK[opp_disc_idx] if opp_disc_idx is not None else 2
+    opp_disc_suit = CARD_SUIT[opp_disc_idx] if opp_disc_idx is not None else -1
+
+    alt_flop_score = {}
+    if opp_disc_idx is not None:
+        for c in rem_deck:
+            alt_flop_score[c] = eval5_idx(c, opp_disc_idx, b0, b1, b2)
+
+    flop_suit_counts = [0, 0, 0, 0]
+    flop_suit_counts[CARD_SUIT[b0]] += 1
+    flop_suit_counts[CARD_SUIT[b1]] += 1
+    flop_suit_counts[CARD_SUIT[b2]] += 1
+
+    total_weight = 0.0
+    weighted_wins = 0.0
+
+    for i in range(n_rem):
+        opp0 = rem_deck[i]
+        r0 = CARD_RANK[opp0]
+        s0 = CARD_SUIT[opp0]
+        alt0 = alt_flop_score.get(opp0, 0)
+        for j in range(i + 1, n_rem):
+            opp1 = rem_deck[j]
+            r1 = CARD_RANK[opp1]
+            s1 = CARD_SUIT[opp1]
+
+            weight = 1.0
+            if opp_disc_idx is not None:
+                keep_flop_score = eval5_idx(opp0, opp1, b0, b1, b2)
+                max_alt = alt0 if alt0 >= alt_flop_score[opp1] else alt_flop_score[opp1]
+                has_draw = (s0 == s1 and flop_suit_counts[s0] >= 2)
+                if keep_flop_score < max_alt and not has_draw:
+                    weight = 0.08
+                else:
+                    weight = 1.30
+                if opp_disc_rank >= 11 and keep_flop_score < (1 << 20) and not has_draw:
+                    if (r0 if r0 >= r1 else r1) < opp_disc_rank:
+                        weight *= 0.15
+                if s0 == opp_disc_suit and s1 == opp_disc_suit:
+                    weight *= 0.30
+
+            opp_score = eval7_idx((opp0, opp1, b0, b1, b2, b3, b4))
+
+            if opp_range_bias > 0.05:
+                if opp_score >= (2 << 20):
+                    weight *= (1.0 + opp_range_bias * 2.0)
+                elif opp_score >= (1 << 20):
+                    weight *= (1.0 + opp_range_bias * 1.1)
+                else:
+                    weight *= max(0.30, 1.0 - opp_range_bias * 0.7)
+            elif opp_range_bias < -0.05:
+                if opp_score < (1 << 20) | (10 << 12):
+                    weight *= (1.0 + abs(opp_range_bias) * 1.8)
+
+            total_weight += weight
+            if my_score > opp_score:
+                weighted_wins += weight
+            elif my_score == opp_score:
+                weighted_wins += 0.5 * weight
+
+    return weighted_wins / max(total_weight, 1e-9)
+
+
+def post_discard_equity(hole2_strs, board_strs, my_discard_str, opp_discard_str,
+                        opp_range_bias=0.0, num_rollouts=145):
+    """
+    On the River (5 board cards): Uses `exact_river_equity` (zero-variance combinatorial solver!).
+    On the Turn (4 board cards): Uses pre-evaluated flop discard lookup (`alt_flop_score`) for 3x faster rollouts!
     """
     hole_idxs = [CARD_IDX[c] for c in hole2_strs]
     board_idxs = [CARD_IDX[c] for c in board_strs]
@@ -367,46 +432,47 @@ def post_discard_equity(hole2_strs, board_strs, my_discard_str, opp_discard_str,
         dead_idxs.add(opp_disc_idx)
 
     rem_deck = [i for i in range(52) if i not in dead_idxs]
-    cards_to_come = 5 - len(board_idxs)
 
+    if len(board_idxs) == 5:
+        return exact_river_equity(hole_idxs, board_idxs, rem_deck, opp_disc_idx, opp_range_bias)
+
+    b0, b1, b2, b3 = board_idxs[0], board_idxs[1], board_idxs[2], board_idxs[3]
     opp_disc_rank = CARD_RANK[opp_disc_idx] if opp_disc_idx is not None else 2
     opp_disc_suit = CARD_SUIT[opp_disc_idx] if opp_disc_idx is not None else -1
-    flop3 = board_idxs[:3]
+
+    alt_flop_score = {}
+    if opp_disc_idx is not None:
+        for c in rem_deck:
+            alt_flop_score[c] = eval5_idx(c, opp_disc_idx, b0, b1, b2)
+
+    flop_suit_counts = [0, 0, 0, 0]
+    flop_suit_counts[CARD_SUIT[b0]] += 1
+    flop_suit_counts[CARD_SUIT[b1]] += 1
+    flop_suit_counts[CARD_SUIT[b2]] += 1
 
     total_weight = 0.0
     weighted_wins = 0.0
 
     for _ in range(num_rollouts):
-        sample = random.sample(rem_deck, 2 + cards_to_come)
-        opp0, opp1 = sample[0], sample[1]
-        full_board = board_idxs + sample[2:]
-
+        opp0, opp1, river = random.sample(rem_deck, 3)
         weight = 1.0
-        if opp_disc_idx is not None and len(flop3) == 3:
-            keep_flop_score = eval5_idx(opp0, opp1, flop3[0], flop3[1], flop3[2])
-            alt1_score = eval5_idx(opp0, opp_disc_idx, flop3[0], flop3[1], flop3[2])
-            alt2_score = eval5_idx(opp1, opp_disc_idx, flop3[0], flop3[1], flop3[2])
-
-            has_draw = False
-            if CARD_SUIT[opp0] == CARD_SUIT[opp1]:
-                sc = CARD_SUIT[opp0]
-                if sum(1 for b in flop3 if CARD_SUIT[b] == sc) >= 2:
-                    has_draw = True
-
-            if keep_flop_score < max(alt1_score, alt2_score) and not has_draw:
-                weight *= 0.08
+        if opp_disc_idx is not None:
+            keep_flop_score = eval5_idx(opp0, opp1, b0, b1, b2)
+            max_alt = alt_flop_score[opp0] if alt_flop_score[opp0] >= alt_flop_score[opp1] else alt_flop_score[opp1]
+            s0, s1 = CARD_SUIT[opp0], CARD_SUIT[opp1]
+            has_draw = (s0 == s1 and flop_suit_counts[s0] >= 2)
+            if keep_flop_score < max_alt and not has_draw:
+                weight = 0.08
             else:
-                weight *= 1.30
-
+                weight = 1.30
             if opp_disc_rank >= 11 and keep_flop_score < (1 << 20) and not has_draw:
                 if max(CARD_RANK[opp0], CARD_RANK[opp1]) < opp_disc_rank:
                     weight *= 0.15
-
-            if CARD_SUIT[opp0] == opp_disc_suit and CARD_SUIT[opp1] == opp_disc_suit:
+            if s0 == opp_disc_suit and s1 == opp_disc_suit:
                 weight *= 0.30
 
-        my_score = eval7_idx(hole_idxs + full_board)
-        opp_score = eval7_idx([opp0, opp1] + full_board)
+        my_score = eval7_idx((hole_idxs[0], hole_idxs[1], b0, b1, b2, b3, river))
+        opp_score = eval7_idx((opp0, opp1, b0, b1, b2, b3, river))
 
         if opp_range_bias > 0.05:
             if opp_score >= (2 << 20):
