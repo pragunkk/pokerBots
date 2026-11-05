@@ -335,6 +335,13 @@ class AdaptiveBot:
             return "COMEBACK"
         return "NORMAL"
 
+    def rollouts(self, full, minimum, time_left):
+        """Full Monte-Carlo strength while we have > ~45 ms per remaining hand, shrinking to `minimum`."""
+        hands_left = max(1, self.total_hands - self.hand_id + 1)
+        per_hand_ms = time_left / hands_left
+        scale = max(0.0, min(1.0, (per_hand_ms - 15.0) / 30.0))
+        return int(minimum + (full - minimum) * scale)
+
     def choose_discard(self, req):
         hole = req["hole_cards"]
         board = req["board"]
@@ -344,7 +351,7 @@ class AdaptiveBot:
             eq_map = self.cached_flop_eq_map
         else:
             time_left = req.get("time_left_ms", 30000)
-            rollouts = 80 if time_left > 12000 else 35
+            rollouts = self.rollouts(300, 35, time_left)
             best_card, best_eq, eq_map = evaluate_discard_options(
                 hole, board, num_rollouts=rollouts, opp_vpip=self.opp.vpip
             )
@@ -491,7 +498,7 @@ class AdaptiveBot:
 
         if street == "flop":
             if self.cached_flop_eq is None:
-                rollouts = 80 if time_left > 15000 else 40
+                rollouts = self.rollouts(300, 40, time_left)
                 best_c, best_eq, eq_map = evaluate_discard_options(
                     self.hole3, board, num_rollouts=rollouts, opp_vpip=self.opp.vpip
                 )
@@ -504,7 +511,7 @@ class AdaptiveBot:
             full_cat = eval_cards(keep2, board) >> 20
             has_draw = has_strong_draw(keep2, board)
         else:
-            rollouts = 100 if time_left > 15000 else 45
+            rollouts = self.rollouts(400, 45, time_left)
             if archetype == "MANIAC":
                 opp_bias = -0.20 if to_call > 0 else 0.0
             elif archetype == "NIT_TAG" and to_call > 0:
