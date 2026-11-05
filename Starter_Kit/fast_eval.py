@@ -376,10 +376,15 @@ def post_discard_equity(hole2_strs, board_strs, my_discard_str, opp_discard_str,
     total_weight = 0.0
     weighted_wins = 0.0
 
-    for _ in range(num_rollouts):
-        sample = random.sample(rem_deck, 2 + cards_to_come)
+    if cards_to_come == 0:
+        samples = combinations(rem_deck, 2)  # river: every possible opponent hand, exact
+        my_river = eval7_idx(hole_idxs + board_idxs)
+    else:
+        samples = (random.sample(rem_deck, 2 + cards_to_come) for _ in range(num_rollouts))
+        my_river = None
+    for sample in samples:
         opp0, opp1 = sample[0], sample[1]
-        full_board = board_idxs + sample[2:]
+        full_board = board_idxs + list(sample[2:])
 
         weight = 1.0
         if opp_disc_idx is not None and len(flop3) == 3:
@@ -405,7 +410,7 @@ def post_discard_equity(hole2_strs, board_strs, my_discard_str, opp_discard_str,
             if CARD_SUIT[opp0] == opp_disc_suit and CARD_SUIT[opp1] == opp_disc_suit:
                 weight *= 0.30
 
-        my_score = eval7_idx(hole_idxs + full_board)
+        my_score = my_river if my_river is not None else eval7_idx(hole_idxs + full_board)
         opp_score = eval7_idx([opp0, opp1] + full_board)
 
         if opp_range_bias > 0.05:

@@ -2139,10 +2139,15 @@ def post_discard_equity(hole2_strs, board_strs, my_discard_str, opp_discard_str,
     total_weight = 0.0
     weighted_wins = 0.0
 
-    for _ in range(num_rollouts):
-        sample = random.sample(rem_deck, 2 + cards_to_come)
+    if cards_to_come == 0:
+        samples = combinations(rem_deck, 2)  # river: every possible opponent hand, exact
+        my_river = eval7_idx(hole_idxs + board_idxs)
+    else:
+        samples = (random.sample(rem_deck, 2 + cards_to_come) for _ in range(num_rollouts))
+        my_river = None
+    for sample in samples:
         opp0, opp1 = sample[0], sample[1]
-        full_board = board_idxs + sample[2:]
+        full_board = board_idxs + list(sample[2:])
 
         weight = 1.0
         if opp_disc_idx is not None and len(flop3) == 3:
@@ -2168,7 +2173,7 @@ def post_discard_equity(hole2_strs, board_strs, my_discard_str, opp_discard_str,
             if CARD_SUIT[opp0] == opp_disc_suit and CARD_SUIT[opp1] == opp_disc_suit:
                 weight *= 0.30
 
-        my_score = eval7_idx(hole_idxs + full_board)
+        my_score = my_river if my_river is not None else eval7_idx(hole_idxs + full_board)
         opp_score = eval7_idx([opp0, opp1] + full_board)
 
         if opp_range_bias > 0.05:
@@ -2518,6 +2523,13 @@ class AdaptiveBot:
             return "COMEBACK"
         return "NORMAL"
 
+    def rollouts(self, full, minimum, time_left):
+        """Full Monte-Carlo strength while we have > ~45 ms per remaining hand, shrinking to `minimum`."""
+        hands_left = max(1, self.total_hands - self.hand_id + 1)
+        per_hand_ms = time_left / hands_left
+        scale = max(0.0, min(1.0, (per_hand_ms - 15.0) / 30.0))
+        return int(minimum + (full - minimum) * scale)
+
     def choose_discard(self, req):
         hole = req["hole_cards"]
         board = req["board"]
@@ -2527,7 +2539,7 @@ class AdaptiveBot:
             eq_map = self.cached_flop_eq_map
         else:
             time_left = req.get("time_left_ms", 30000)
-            rollouts = 80 if time_left > 12000 else 35
+            rollouts = self.rollouts(300, 35, time_left)
             best_card, best_eq, eq_map = evaluate_discard_options(
                 hole, board, num_rollouts=rollouts, opp_vpip=self.opp.vpip
             )
@@ -2674,7 +2686,7 @@ class AdaptiveBot:
 
         if street == "flop":
             if self.cached_flop_eq is None:
-                rollouts = 80 if time_left > 15000 else 40
+                rollouts = self.rollouts(300, 40, time_left)
                 best_c, best_eq, eq_map = evaluate_discard_options(
                     self.hole3, board, num_rollouts=rollouts, opp_vpip=self.opp.vpip
                 )
@@ -2687,7 +2699,7 @@ class AdaptiveBot:
             full_cat = eval_cards(keep2, board) >> 20
             has_draw = has_strong_draw(keep2, board)
         else:
-            rollouts = 100 if time_left > 15000 else 45
+            rollouts = self.rollouts(400, 45, time_left)
             if archetype == "MANIAC":
                 opp_bias = -0.20 if to_call > 0 else 0.0
             elif archetype == "NIT_TAG" and to_call > 0:
