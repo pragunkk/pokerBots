@@ -1,65 +1,86 @@
-# Pokerbots Hackathon: Discard Hold'em — Adaptive Meta-Bot v6
+# Pokerbots Hackathon: Discard Hold'em — Adaptive Meta-Bot v6.1 & Official Two-Leg Tournament Runner
 
-Championship submission and 24-bot testing framework for **Discard Hold'em** (Python 3.11, protocol v1.0).
+Championship submission and 24-bot testing framework for **Discard Hold'em** (Python 3.11, protocol v1.0), updated for the organisers' **Two-Leg Match Format (`LEGS = 2`)**.
 
-## 1. Repository Layout
+## 1. Summary of Organiser Updates (`update/` Folder)
 
-| Path | Description |
-| :--- | :--- |
-| `Starter_Kit/bot.py` | **Standalone Championship Submission Bot (Adaptive Meta-Bot v6)** — self-contained single-file bundle (`99.3 KB`, standard library only, zero runtime file I/O, `< 1.8s` per 1,000-hand match). |
-| `Starter_Kit/adaptive_bot.py` | Modular source for **Adaptive Meta-Bot v6** (`OpponentProfile` dual-window tracker, multi-gear selector, sub-threshold value optimizer, triple-barrel river defense, and match-point variance controller). |
-| `Starter_Kit/fast_eval.py` | Sorting-network 5/7-card hand evaluator, **Full 903-Hand Exact Combinatorial River Solver (`exact_river_equity`)**, **Pre-Evaluated Turn Rollout Engine (`145` rollouts)**, `hole_interaction_level`, `board_danger_level`, and `has_strong_draw`. |
-| `Starter_Kit/preflop_table.py` | Embedded lookup table for all **1,755 canonical 3-card preflop isomorphism classes** in Discard Hold'em. |
-| `Starter_Kit/tournament_sim.py` | Parallel multi-seed tournament simulator across the **24-Bot Championship Suite** (5 Extreme Heuristics, 8 Archetypes, 5 Proven Computer-Poker Algorithms, 3 Radical Architectures, and 3 Self-Play Evolutionary Mirrors `v3`, `v4`, `v5`). |
-| `Starter_Kit/engine.py` | Official Discard Hold'em local match runner. |
-| `STRATEGY_AND_ROADMAP.md` | Full mathematical analysis, exploit forensics, radical architectures, and evolutionary roadmap (`v1` $\to$ `v6`). |
+| Area | Old Specification (Nov 1) | Updated Official Specification (Nov 4) | Implementation in Our Project |
+| :--- | :--- | :--- | :--- |
+| **Match Format (`LEGS = 2`)** | Single continuous process playing 400 hands (Stage 1) or 1000 hands (Stage 2), with duplicate deals on consecutive hand IDs `(2k+1, 2k+2)`. | **Two Legs per Match (`LEGS = 2`)**: Stage 1 = 2 legs of `200` deals (`400` hands total); Stage 2 = 2 legs of `500` deals (`1000` hands total). Fresh bot processes are launched for each leg (`init` sends `total_hands: 200` or `500`), and Leg 2 swaps hole cards and seats (`button = (deal + leg) % 2`). | Updated `Starter_Kit/engine.py`, `Starter_Kit/adaptive_bot.py`, and `Starter_Kit/bot.py` (`v6.1`). Removed single-leg `PROTECT_WIN`/`COMEBACK` throttling because card luck only cancels across Leg 1 + Leg 2 combined—maximizing chip EV on every hand in both legs is strictly optimal. |
+| **Per-Leg Time Bank & Wall Clock** | `60s` time bank / `180s` wall-clock (Stage 1); `150s` time bank / `450s` wall-clock (Stage 2). | **`30s` time bank / `90s` wall-clock per leg** in Stage 1; **`75s` time bank / `225s` wall-clock per leg** in Stage 2 (`5.0s` free start-up per leg). | Calibrated rollout thresholds in `adaptive_bot.py` and `bot.py` to the `30,000 ms` per-leg bank (`> 8,000 ms` for full 90-rollout flop, 145-rollout turn, and 903-hand exact river enumeration; `< 2,000 ms` instant guard). |
+| **Logs & Forfeits** | Single `A_stderr.txt`, `B_stderr.txt`; hand logs `#1..#400`. | Per-leg stderr files (`A_leg1_stderr.txt`, `A_leg2_stderr.txt`, `B_leg1_stderr.txt`, `B_leg2_stderr.txt`) and leg-prefixed hand logs (`L1 #1`, `L2 #1`). A forfeit in Leg 1 skips Leg 2 and awards `+C` / `-C`. | Integrated into `Starter_Kit/engine.py` and parsed automatically in `Starter_Kit/run_tournament.py`. |
 
-## 2. Radical Bot Architectures Explored (`Starter_Kit/example_bots/`)
+## 2. How to Run Practice Matches & Tournaments Against Your Friend's Bot
 
-1. **`mcts_ismcts_bot.py` — Information-Set Monte Carlo Tree Search (IS-MCTS) / Direct EV Tree Planner**:
-   - Replaces static threshold rules with explicit Expected-Value maximization over discrete action trees `A = {fold, check/call, raise_0.38x, raise_0.58x, raise_0.85x}` using an online logistic fold-probability model $P(\text{fold} \mid \text{bet\_frac}, \text{street})$ and equity degradation when called.
-2. **`contextual_bandit_meta_bot.py` — Online Multiplicative-Weights / Hedge Expert Portfolio Meta-Bot**:
-   - Maintains 5 specialist expert policies (`GTO_MDF`, `StationValue`, `NitSteal`, `ManiacTrap`, `SmallBallMeta`), evaluates counterfactual hand rewards after every hand, and updates portfolio weights via exponential multiplicative weights $w_i \leftarrow w_i \exp(\eta \cdot r_i)$.
-3. **`exact_bayesian_ev_bot.py` — Exact Zero-Variance Combinatorial River Solver & Probe-Tell Bot**:
-   - Replaces noisy River Monte Carlo sampling with exact combinatorial enumeration over the remaining $43$ cards ($\binom{43}{2} = 903$ opponent river holdings) using pre-evaluated single-card flop-discard scores (`alt_flop_score`), plus 150 pre-evaluated Turn rollouts.
-
-## 3. Adaptive Meta-Bot v6 Breakthroughs (`Starter_Kit/bot.py`)
-
-1. **Full 903-Hand Exact Combinatorial River Solver (`exact_river_equity`)**:
-   - Precomputes `my_score` once and `alt_flop_score[c] = eval5_idx(c, opp_discard, b0, b1, b2)` in $43$ calls, then evaluates all $\binom{43}{2} = 903$ possible opponent 2-card holdings on the River in `< 1.5 ms` with **0.0% Monte Carlo sampling variance**.
-2. **Pre-Evaluated Turn Rollout Accelerator (`145` rollouts)**:
-   - Precomputes single-card flop-discard scores once per Turn decision, cutting per-rollout cost by `3x` and increasing Turn rollout precision by `45%`.
-3. **Sub-Threshold Value Sizing Optimization (`0.62x` pot)**:
-   - Sizes strong Top Pair / Overpair (`inter >= 2, eq_adj >= 0.68`) value bets at `0.62x` pot—extracting `+20%` more chips per street than `0.52x` while staying safely underneath the `0.72x` river overbet-fold threshold of rival bots.
-4. **Triple-Barrel One-Pair River Defense (`opp_bet_flop and opp_bet_turn`)**:
-   - Recognizes that non-Maniac algorithms (`river_barrel_rate < 0.48`) never triple-barrel Flop + Turn + River (`>= 48%` pot) as a bluff, folding dominated bare One Pair (`inter <= 2, eq_adj < 0.58`) on the River.
-5. **Extreme Heuristic & Capped-Range Exploits**:
-   - Retains the `100%` Auto-Steal vs. Extreme Folders (`+450/450` vs. `Always Fold`), Anti-Shove-Spammer Shield (`+13,524` vs. `Always Shove`), Turn Unimproved Air Guard (`has_strong_draw`), and Asymmetric Checked-Through River Thresholds.
-
-## 4. Benchmark Results: Adaptive Bot v6 vs. Previous Generations (`v5`, `v4`, `v3`) & Radical Architectures
-
-Tested across `300` duplicate-deal hands/match $\times$ 4 seeds (`1,200` hands per opponent, `7,200` hands total):
-
-| Opponent Architecture / Mirror | W–D–L | Seed Breakdown (`101, 202, 303, 404`) | Total Net Chips | Avg / Hand | Notices |
-| :--- | :---: | :--- | :---: | :---: | :---: |
-| `adaptive_v5_mirror.py` (Previous Gen: Adaptive Bot v5) | **3–0–1** | `+93, -280, +270, +843` | **`+926`** | **`+0.772`** | 0 |
-| `adaptive_v4_mirror.py` (Previous Gen: Adaptive Bot v4) | **4–0–0** | `+127, +484, +318, +221` | **`+1,150`** | **`+0.958`** | 0 |
-| `adaptive_v3_mirror.py` (Previous Gen: Adaptive Bot v3) | **3–0–1** | `+190, -276, +517, +207` | **`+638`** | **`+0.532`** | 0 |
-| `mcts_ismcts_bot.py` (Radical 1: IS-MCTS Direct EV Tree) | **2–0–2** | `-366, -449, +561, +409` | **`+155`** | **`+0.129`** | 0 |
-| `contextual_bandit_meta_bot.py` (Radical 2: Hedge Portfolio) | **3–0–1** | `-295, +253, +398, +1050` | **`+1,406`** | **`+1.172`** | 0 |
-| `exact_bayesian_ev_bot.py` (Radical 3: Exact River Solver) | **4–0–0** | `+75, +344, +137, +146` | **`+702`** | **`+0.585`** | 0 |
-| **Overall (`7,200` Hands)** | **19–0–5 (`79.2%`)** | — | **`+4,977`** | **`+0.691`** | **0** |
-
-## 5. Quick Start
+All tournament and match runners are inside `Starter_Kit/`:
 
 ```bash
 cd Starter_Kit
-# Run a 400-hand Stage 1 or 1000-hand Stage 2 match
-python3 engine.py bot.py example_bots/adaptive_v5_mirror.py --stage 1
-python3 engine.py bot.py example_bots/exact_bayesian_ev_bot.py --stage 2
-
-# Run parallel multi-seed benchmark suites
-python3 tournament_sim.py proven bot.py
-python3 tournament_sim.py heuristics bot.py
-python3 tournament_sim.py full20 bot.py
 ```
+
+### A. Single Official Two-Leg Match (`engine.py`)
+Run a single Stage 1 (`400` hands = 2 legs of `200` deals) or Stage 2 (`1000` hands = 2 legs of `500` deals) match between our `bot.py` and your friend's bot:
+
+```bash
+# Stage 1 match (400 hands across 2 legs, 30s bank/leg, Cap C = 400)
+python3 engine.py bot.py /path/to/friend_bot.py
+
+# Stage 2 Finals match (1000 hands across 2 legs, 75s bank/leg, Cap C = 1000)
+python3 engine.py bot.py /path/to/friend_bot.py --stage 2
+
+# Replay a specific deal seed and print every hand live to the console
+python3 engine.py bot.py /path/to/friend_bot.py --seed 42 --verbose
+```
+- Hand-by-hand logs (`L1 #1 ...`, `L2 #1 ...`) are written to `Starter_Kit/logs/match.log`.
+
+### B. Multi-Match Head-to-Head Practice Series (`run_tournament.py`)
+To get statistically reliable results across multiple random seeds (with automatic parallel execution, Match Points, official Capped Score $\text{Score}_{\text{cap}}$, and raw chip averages):
+
+```bash
+# Play 5 Stage-1 matches (2,000 hands total) in parallel against your friend's bot
+python3 run_tournament.py bot.py /path/to/friend_bot.py --stage 1 --matches 5
+
+# Play 5 Stage-2 Finals matches (5,000 hands total) in parallel
+python3 run_tournament.py bot.py /path/to/friend_bot.py --stage 2 --matches 5
+
+# Save match logs for every match in the series
+python3 run_tournament.py bot.py /path/to/friend_bot.py --matches 5 --log-prefix logs/friend_series
+```
+
+### C. Full Round-Robin or Swiss Tournament (`run_tournament.py`)
+Include your friend's bot alongside our `bot.py` and any of the 24 bots in `example_bots/` to simulate an official Stage 1 Swiss Qualifier or Stage 2 Round-Robin Finals table (ranked by **Match Points**, then **Official $\text{Score}_{\text{cap}} = \frac{\sum \text{clip}(\Delta_m, -C, C)}{\sum H_m}$**):
+
+```bash
+# Official Round-Robin Tournament
+python3 run_tournament.py --round-robin \
+  bot.py \
+  /path/to/friend_bot.py \
+  example_bots/cfr_nash_bot.py \
+  example_bots/exact_bayesian_ev_bot.py \
+  example_bots/kelly_pot_geometric_bot.py \
+  example_bots/lag_maniac_bot.py
+
+# Official Stage 1 Swiss Qualifier Tournament (e.g., 6 rounds)
+python3 run_tournament.py --swiss --rounds 6 \
+  bot.py \
+  /path/to/friend_bot.py \
+  example_bots/cfr_nash_bot.py \
+  example_bots/exact_bayesian_ev_bot.py \
+  example_bots/kelly_pot_geometric_bot.py \
+  example_bots/bayesian_range_bot.py \
+  example_bots/tag_bot.py \
+  example_bots/trapper_bot.py
+```
+
+## 3. Repository Layout
+
+| Path | Description |
+| :--- | :--- |
+| `Starter_Kit/bot.py` | **Standalone Championship Submission Bot (Adaptive Meta-Bot v6.1)** — self-contained single-file bundle (`97.7 KB`, standard library only, zero runtime file I/O). |
+| `Starter_Kit/run_tournament.py` | **Official Two-Leg Practice Series, Round-Robin & Swiss Tournament Runner**. |
+| `Starter_Kit/engine.py` | Official updated Two-Leg Discard Hold'em match engine (`LEGS = 2`). |
+| `Starter_Kit/adaptive_bot.py` | Modular source for **Adaptive Meta-Bot v6.1**. |
+| `Starter_Kit/fast_eval.py` | Sorting-network 5/7-card hand evaluator, **Full 903-Hand Exact Combinatorial River Solver (`exact_river_equity`)**, and **Pre-Evaluated Turn Rollout Engine (`145` rollouts)**. |
+| `Starter_Kit/preflop_table.py` | Embedded lookup table for all **1,755 canonical 3-card preflop isomorphism classes**. |
+| `Starter_Kit/tournament_sim.py` | 24-bot benchmark suite runner (`proven`, `heuristics`, `full20`). |
+| `problemStatement.pdf`, `ruleBook.pdf`, `protocol.pdf` | Updated official tournament documents (Nov 4 revision). |
