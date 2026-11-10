@@ -1,7 +1,7 @@
 """
 Ultra-fast Hand Evaluator, Precomputed 1,755 Canonical 3-Card Preflop Evaluator,
 Post-Flop Discard Optimizer, Exact Zero-Variance Combinatorial River Solver,
-Pre-Evaluated Turn Rollout Engine, and Board Texture Danger Analyzer (v6 Championship Engine).
+Pre-Evaluated Turn Rollout Engine, and Board Texture Danger Analyzer (v6.2 Championship Engine).
 Uses only Python 3.11 standard library.
 """
 
@@ -274,7 +274,7 @@ def board_danger_level(board_strs):
     return min(1.0, danger)
 
 
-def evaluate_discard_options(hole3_strs, flop3_strs, num_rollouts=95, opp_vpip=0.65):
+def evaluate_discard_options(hole3_strs, flop3_strs, num_rollouts=120, opp_vpip=0.65):
     """
     Evaluates all 3 flop discard choices, combining:
       1. Expected Showdown Equity against opponent's VPIP-filtered range and optimal discard
@@ -417,7 +417,7 @@ def exact_river_equity(hole_idxs, board_idxs, rem_deck, opp_disc_idx, opp_range_
 
 
 def post_discard_equity(hole2_strs, board_strs, my_discard_str, opp_discard_str,
-                        opp_range_bias=0.0, num_rollouts=145):
+                        opp_range_bias=0.0, num_rollouts=180):
     """
     On the River (5 board cards): Uses `exact_river_equity` (zero-variance combinatorial solver!).
     On the Turn (4 board cards): Uses pre-evaluated flop discard lookup (`alt_flop_score`) for 3x faster rollouts!
