@@ -1,20 +1,17 @@
 """
-Adaptive Meta-Strategy Bot v6 (Championship Engine for Discard Hold'em).
-Synthesizes the proven v5 core with four surgical upgrades:
-1. Full 903-Hand Exact Combinatorial River Solver (`exact_river_equity` in `fast_eval.py`):
-   - Evaluates all C(43, 2) = 903 possible opponent 2-card river holdings deterministically
-     using precomputed single-card flop-discard scores (0.0% Monte Carlo variance on the River!).
-2. Pre-Evaluated Turn Rollout Accelerator (`145` rollouts with cached `alt_flop_score`):
-   - 3x faster per rollout on the Turn, enabling 45% more samples in < 1.2 ms.
-3. Sub-Threshold Value Sizing Optimization (`0.64x` pot for Strong Top Pair / Overpair `eq >= 0.68`):
-   - Extracts +23% more value on every street while staying safely below the `0.72x` river overbet-fold
-     threshold used by rival bots.
-4. Triple-Barrel One-Pair Defense (`opp_bet_flop and opp_bet_turn and river bet >= 45% pot`):
-   - Recognizes that non-Maniac bots never triple-barrel Flop + Turn + River as a bluff, folding
-     dominated bare Top Pair (`inter == 2, eq_adj < 0.60`) on the River to save 35–80 chips per cooler.
-5. Extreme Heuristic & Boundary Exploiter:
-   - Auto-Steal vs Extreme Folders (`+450/450` theoretical max vs Always-Fold)
-   - Anti-Shove-Spammer Shield (`+13,500+` vs Always-Shove)
+Adaptive Meta-Strategy Bot v6.1 (Updated for Official Two-Leg Match Format & Per-Leg Time Banks).
+Key Updates for Organiser Rulebook & Engine Changes:
+1. Two-Leg Duplicate Match Optimization (`LEGS = 2`, 200 hands/leg Stage 1, 500 hands/leg Stage 2):
+   - Because each leg runs in an isolated fresh process and card luck only cancels across Leg 1 + Leg 2
+     combined, unilateral single-leg score throttling (`PROTECT_WIN` / `COMEBACK`) is removed so the bot
+     strictly maximizes expected chip EV on every hand of both legs!
+2. Per-Leg Time Bank Calibration (`30,000 ms` Stage 1 / `75,000 ms` Stage 2):
+   - Calibrates rollout thresholds to the new per-leg time banks (`> 8,000 ms` for full 95-rollout flop,
+     150-rollout pre-evaluated turn, and 903-hand exact combinatorial river solver; `< 2,000 ms` emergency guard).
+3. Full 903-Hand Exact Combinatorial River Solver (`exact_river_equity` in `fast_eval.py`)
+4. Pre-Evaluated Turn Rollout Accelerator (`150` rollouts with cached `alt_flop_score`)
+5. Sub-Threshold Value Sizing (`0.62x` pot for Strong Top Pair / Overpair) & Triple-Barrel One-Pair Defense
+6. Extreme Heuristic & Boundary Exploiter (`Auto-Steal` vs Extreme Folders, `Anti-Shove-Spammer Shield`).
 """
 
 import json
@@ -265,9 +262,9 @@ class OpponentProfile:
 
 class AdaptiveBot:
     def __init__(self):
-        self.total_hands = 400
+        self.total_hands = 200  # Per-leg hands (200 in Stage 1, 500 in Stage 2)
         self.starting_stack = 200
-        self.time_bank_ms = 60000
+        self.time_bank_ms = 30000  # Per-leg time bank (30s in Stage 1, 75s in Stage 2)
         self.cap = 400
 
         self.hand_id = 0
@@ -284,10 +281,11 @@ class AdaptiveBot:
         self.cached_flop_eq_map = None
 
     def handle_init(self, msg):
-        self.total_hands = msg.get("total_hands", 400)
+        self.total_hands = msg.get("total_hands", 200)
         self.starting_stack = msg.get("starting_stack", 200)
-        self.time_bank_ms = msg.get("time_bank_ms", 60000)
-        self.cap = 1000 if self.total_hands > 500 else 400
+        self.time_bank_ms = msg.get("time_bank_ms", 30000)
+        # In the updated 2-leg format, Stage 2 sends total_hands = 500 per leg (1000 match total)
+        self.cap = 1000 if self.total_hands >= 500 else 400
 
     def handle_new_hand(self, msg):
         self.hand_id = msg["hand_id"]
@@ -322,16 +320,6 @@ class AdaptiveBot:
                 if inter <= 1:
                     self.opp.showdown_bluffs += 1
 
-    def get_risk_mode(self):
-        hands_left = max(1, self.total_hands - self.hand_id + 1)
-        if self.cum_net > self.cap + 140:
-            return "PROTECT_WIN"
-        if hands_left <= 45 and self.cum_net > max(85, hands_left * 3.5):
-            return "PROTECT_WIN"
-        if hands_left <= 45 and self.cum_net < -20 and self.cum_net > -hands_left * 15:
-            return "COMEBACK"
-        return "NORMAL"
-
     def choose_discard(self, req):
         hole = req["hole_cards"]
         board = req["board"]
@@ -339,7 +327,7 @@ class AdaptiveBot:
             best_card = self.cached_flop_discard
         else:
             time_left = req.get("time_left_ms", 30000)
-            rollouts = 85 if time_left > 12000 else 35
+            rollouts = 90 if time_left > 8000 else 35
             best_card, _, _ = evaluate_discard_options(
                 hole, board, num_rollouts=rollouts, opp_vpip=self.opp.vpip
             )
@@ -353,9 +341,8 @@ class AdaptiveBot:
         time_left = req.get("time_left_ms", 30000)
 
         archetype = self.opp.classify()
-        risk_mode = self.get_risk_mode()
 
-        if time_left < 2500:
+        if time_left < 2000:
             if "check" in legal:
                 return {"type": "action", "action": "check"}
             if to_call <= 4 and "call" in legal:
@@ -363,11 +350,11 @@ class AdaptiveBot:
             return {"type": "action", "action": "fold"}
 
         if street == "preflop":
-            return self._play_preflop(req, archetype, risk_mode)
+            return self._play_preflop(req, archetype)
         else:
-            return self._play_postflop(req, archetype, risk_mode, time_left)
+            return self._play_postflop(req, archetype, time_left)
 
-    def _play_preflop(self, req, archetype, risk_mode):
+    def _play_preflop(self, req, archetype):
         legal = req["legal_actions"]
         to_call = req["to_call"]
         opp_bet = req["opp_bet"]
@@ -410,14 +397,6 @@ class AdaptiveBot:
             call_raise_thresh = 0.36
             three_bet_val_thresh = 0.68
 
-        if risk_mode == "PROTECT_WIN":
-            open_thresh += 0.08
-            call_raise_thresh += 0.08
-            three_bet_val_thresh += 0.10
-        elif risk_mode == "COMEBACK":
-            open_thresh -= 0.05
-            three_bet_val_thresh -= 0.05
-
         if opp_bet <= 2:
             if strength >= open_thresh and "raise" in legal:
                 if archetype == "CALLING_STATION" and strength > 0.60:
@@ -439,8 +418,6 @@ class AdaptiveBot:
 
         if opp_bet >= 35:
             req_s = 0.76 if archetype != "MANIAC" else 0.62
-            if risk_mode == "PROTECT_WIN" and self.opp.preflop_shove_rate < 0.15:
-                req_s = max(req_s, 0.82)
             if strength >= req_s:
                 if strength >= 0.85 and "raise" in legal:
                     return {"type": "action", "action": "raise", "amount": req["max_raise"]}
@@ -472,7 +449,7 @@ class AdaptiveBot:
 
         return {"type": "action", "action": "fold"}
 
-    def _play_postflop(self, req, archetype, risk_mode, time_left):
+    def _play_postflop(self, req, archetype, time_left):
         legal = req["legal_actions"]
         street = req["street"]
         board = req["board"]
@@ -485,7 +462,7 @@ class AdaptiveBot:
 
         if street == "flop":
             if self.cached_flop_eq is None:
-                rollouts = 85 if time_left > 15000 else 40
+                rollouts = 90 if time_left > 8000 else 40
                 best_c, best_eq, eq_map = evaluate_discard_options(
                     self.hole3, board, num_rollouts=rollouts, opp_vpip=self.opp.vpip
                 )
@@ -498,8 +475,7 @@ class AdaptiveBot:
             full_cat = eval_cards(keep2, board) >> 20
             has_draw = has_strong_draw(keep2, board)
         else:
-            # River uses 100% exact 903-hand combinatorial enumeration! Turn uses 145 pre-evaluated rollouts!
-            rollouts = 145 if time_left > 15000 else 55
+            rollouts = 145 if time_left > 8000 else 55
             if archetype == "MANIAC":
                 opp_bias = -0.20 if to_call > 0 else 0.0
             elif archetype == "NIT_TAG" and to_call > 0:
@@ -526,13 +502,7 @@ class AdaptiveBot:
 
         danger = board_danger_level(board)
         pot_odds = to_call / max(1, pot + to_call)
-
-        if risk_mode == "PROTECT_WIN":
-            eq_adj = eq - 0.05
-        elif risk_mode == "COMEBACK":
-            eq_adj = eq + 0.04
-        else:
-            eq_adj = eq
+        eq_adj = eq
 
         prev_street = {"flop": "preflop", "turn": "flop", "river": "turn"}[street]
         prev_acts = [h for h in hist if h["street"] == prev_street]
@@ -575,7 +545,6 @@ class AdaptiveBot:
                     and eq_adj < 0.28
                     and prev_checked_through
                     and archetype not in ("CALLING_STATION", "MANIAC")
-                    and risk_mode != "PROTECT_WIN"
                 ):
                     if random.random() < 0.45:
                         target = max(req["min_raise"], min(req["max_raise"], int(pot * 0.38) + 1))
@@ -604,9 +573,6 @@ class AdaptiveBot:
             if eq_adj >= val_thresh:
                 if street == "river" and inter == 2 and danger >= 0.55 and eq_adj < 0.66 and archetype != "CALLING_STATION":
                     return {"type": "action", "action": "check"}
-                # Sub-Threshold Value Sizing Optimization:
-                # With strong Top Pair / Overpair (`inter >= 2, eq_adj >= 0.68`), size up to `0.62x` pot
-                # (safely under the `0.72x` river overbet-fold threshold) to extract +20% more chips!
                 if archetype == "CALLING_STATION":
                     frac = 0.68
                 elif inter >= 2 and eq_adj >= 0.68:
@@ -630,9 +596,6 @@ class AdaptiveBot:
             ):
                 bluff_freq = 0.48 if archetype == "NIT_TAG" else 0.38
                 probe_frac = 0.40
-
-            if risk_mode == "PROTECT_WIN":
-                bluff_freq *= 0.25
 
             if bluff_freq > 0 and random.random() < bluff_freq:
                 target = max(req["min_raise"], min(req["max_raise"], int(pot * probe_frac)))
@@ -707,9 +670,6 @@ class AdaptiveBot:
             inter1_lim = 0.33 if prev_checked_through else 0.26
             if inter == 1 and (to_call > pot * inter1_lim or opp_was_prev_aggressor) and eq_adj < 0.68:
                 return {"type": "action", "action": "fold"}
-            # Triple-Barrel One-Pair Defense:
-            # Non-maniac bots never bluff all 3 streets (Flop + Turn + River >= 48% pot);
-            # fold bare One Pair (`inter <= 2`) if exact river equity is < 0.58!
             if opp_bet_flop and opp_bet_turn and bet_to_pot_ratio >= 0.48 and self.opp.river_barrel_rate < 0.48:
                 if inter <= 2 and eq_adj < 0.58:
                     return {"type": "action", "action": "fold"}
