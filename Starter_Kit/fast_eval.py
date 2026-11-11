@@ -579,6 +579,66 @@ def exact_river_equity(hole_idxs, board_idxs, rem_deck, opp_disc_idx, opp_range_
     return weighted_wins / max(total_weight, 1e-9)
 
 
+def top_range_equity(hole2_strs, board_strs, my_discard_str, opp_discard_str, q, pre_w=None):
+    """Share of the opponent's STRONGEST hands that we beat right now (turn or river).
+
+    Every possible opponent 2-card hand is scored on the current board and weighted the same way
+    as in the equity functions (discard consistency x preflop range). The hands are sorted from
+    strongest to weakest and we return how much of the top `q` slice (by weight) we beat.
+    Used when the opponent makes a very large bet: such bets come from the top of a range."""
+    hole = [CARD_IDX[c] for c in hole2_strs]
+    board = [CARD_IDX[c] for c in board_strs]
+    dead = set(hole + board)
+    if my_discard_str:
+        dead.add(CARD_IDX[my_discard_str])
+    od = CARD_IDX[opp_discard_str] if opp_discard_str else None
+    if od is not None:
+        dead.add(od)
+    rem = [i for i in range(52) if i not in dead]
+    ev = eval7_idx if len(board) == 5 else eval6_idx
+    bt = tuple(board)
+    b0, b1, b2 = board[0], board[1], board[2]
+    my_score = ev((hole[0], hole[1]) + bt)
+    alt = {c: eval5_idx(c, od, b0, b1, b2) for c in rem} if od is not None else None
+    fsc = [0, 0, 0, 0]
+    for c in (b0, b1, b2):
+        fsc[CARD_SUIT[c]] += 1
+    rows = []
+    total = 0.0
+    n = len(rem)
+    for i in range(n):
+        o0 = rem[i]
+        for j in range(i + 1, n):
+            o1 = rem[j]
+            w = 1.0
+            if od is not None:
+                keep = eval5_idx(o0, o1, b0, b1, b2)
+                m_alt = alt[o0] if alt[o0] >= alt[o1] else alt[o1]
+                draw = CARD_SUIT[o0] == CARD_SUIT[o1] and fsc[CARD_SUIT[o0]] >= 2
+                w = 0.08 if (keep < m_alt and not draw) else 1.30
+                if pre_w is not None:
+                    w *= pre_w(pre_strength_idx(o0, o1, od))
+            rows.append((ev((o0, o1) + bt), w))
+            total += w
+    if total <= 0.0:
+        return 0.5
+    rows.sort(reverse=True)
+    need = max(1e-9, min(1.0, q) * total)
+    seen = 0.0
+    beat = 0.0
+    for sc, w in rows:
+        if seen + w > need:
+            w = need - seen
+        if my_score > sc:
+            beat += w
+        elif my_score == sc:
+            beat += 0.5 * w
+        seen += w
+        if seen >= need:
+            break
+    return beat / need
+
+
 def post_discard_equity(hole2_strs, board_strs, my_discard_str, opp_discard_str,
                         opp_range_bias=0.0, num_rollouts=240, pre_w=None):
     """
