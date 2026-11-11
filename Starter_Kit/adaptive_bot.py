@@ -36,6 +36,7 @@ from fast_eval import (
     has_strong_draw,
     hole_interaction_level,
     init_fast_tables,
+    top_range_equity,
     post_discard_equity,
     preflop_3card_strength,
     strength_quantile,
@@ -75,6 +76,10 @@ class OpponentProfile:
         self.check_raises = 0
         self.turn_bet_hands = 0
         self.turn_seen_hands = 0
+        self.overbets = 0            # very large turn/river bets (>= 1.1x pot) we have faced
+        self.overbet_showdowns = 0   # ...that went to showdown
+        self.overbet_bluffs = 0      # ...where they showed a weak hand
+        self.hand_overbet_streets = set()
         self.river_bet_hands = 0
         self.river_seen_hands = 0
 
@@ -97,6 +102,7 @@ class OpponentProfile:
         self.hand_raised_me = 0
         self.hand_saw_turn = False
         self.hand_bet_turn = False
+        self.hand_overbet_streets = set()
         self.hand_saw_river = False
         self.hand_bet_river = False
         self.opp_checked_this_street = False
@@ -296,6 +302,16 @@ class OpponentProfile:
         return g
 
     @property
+    def overbet_rate(self):
+        """How often they make a very large bet, per turn/river street they reach."""
+        return (self.overbets + 0.4) / (self.turn_seen_hands + self.river_seen_hands + 8.0)
+
+    @property
+    def overbet_bluff_rate(self):
+        """Share of their very large bets that were weak hands at showdown (prior: 10%)."""
+        return (self.overbet_bluffs + 0.5) / (self.overbet_showdowns + 5.0)
+
+    @property
     def turn_barrel_rate(self):
         return (self.turn_bet_hands + 1.5) / (self.turn_seen_hands + 5.0)
 
@@ -398,6 +414,10 @@ class AdaptiveBot:
                 h["actor"] == "opp" and h["street"] in ("turn", "river") and h["action"] == "raise"
                 for h in hist
             )
+            if self.opp.hand_overbet_streets:
+                self.opp.overbet_showdowns += 1
+                if hole_interaction_level(msg["opp_hole_cards"], msg["board"]) <= 1:
+                    self.opp.overbet_bluffs += 1
             if opp_bet_late:
                 self.opp.showdowns += 1
                 inter = hole_interaction_level(msg["opp_hole_cards"], msg["board"])
@@ -801,6 +821,25 @@ class AdaptiveBot:
         )
         opp_raised_our_bet = my_bet > 0 and opp_bet > my_bet
         bet_to_pot_ratio = to_call / max(1.0, pot - to_call)
+
+        # 0. Very large bets (>= 1.1x pot) on the turn or river come from the top of a range.
+        # Compare our hand with only the strongest slice of their possible hands (slice size = how
+        # often this opponent makes such bets) plus their measured bluff share, instead of with
+        # their whole range. Learned per opponent, so frequent or bluffy overbettors get called more.
+        if street in ("turn", "river") and bet_to_pot_ratio >= 1.1 and to_call >= 20 and self.opp_discard:
+            if street not in self.opp.hand_overbet_streets:
+                self.opp.hand_overbet_streets.add(street)
+                self.opp.overbets += 1
+            q = max(0.05, min(0.60, self.opp.overbet_rate))
+            eq_top = top_range_equity(self.hole2, board, self.my_discard, self.opp_discard, q, self.pre_w)
+            if street == "turn" and has_draw:
+                eq_top = max(eq_top, 0.18)
+            beta = min(0.60, self.opp.overbet_bluff_rate)
+            p_win = beta + (1.0 - beta) * eq_top
+            if eq_top < 0.85:
+                if p_win >= pot_odds + 0.03 and "call" in legal:
+                    return {"type": "action", "action": "call"}
+                return {"type": "action", "action": "fold" if "fold" in legal else "check"}
 
         # 1. Counter-Maniac Call-Down & Trap Engine
         if archetype == "MANIAC":
