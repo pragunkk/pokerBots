@@ -34,6 +34,8 @@ from fast_eval import (
     hole_interaction_level,
     post_discard_equity,
     preflop_3card_strength,
+    RangeWeight,
+    strength_quantile,
 )
 
 
@@ -311,12 +313,14 @@ class AdaptiveBot:
         self.cached_flop_discard = None
         self.cached_flop_eq = None
         self.cached_flop_eq_map = None
+        self.pre_w = None
 
     def handle_init(self, msg):
         self.total_hands = msg.get("total_hands", 200)
         self.starting_stack = msg.get("starting_stack", 200)
         self.time_bank_ms = msg.get("time_bank_ms", 30000)
         self.cap = 1000 if self.total_hands >= 500 else 400
+        strength_quantile(0.5)  # build the strength distribution now, while the clock is not running
 
     def handle_new_hand(self, msg):
         self.hand_id = msg["hand_id"]
@@ -328,6 +332,7 @@ class AdaptiveBot:
         self.cached_flop_discard = None
         self.cached_flop_eq = None
         self.cached_flop_eq_map = None
+        self.pre_w = None
         self.opp.start_hand(self.seat)
 
     def handle_discard_result(self, msg):
@@ -351,6 +356,49 @@ class AdaptiveBot:
                 if inter <= 1:
                     self.opp.showdown_bluffs += 1
 
+    def opp_preflop_range(self, hist):
+        """Soft model of the opponent's starting-hand range from how they played preflop this hand.
+        Thresholds come from their own measured frequencies, mapped onto the strength distribution
+        of all 22,100 starting hands (top x% of hands -> strength_quantile(1 - x))."""
+        pre = [h for h in hist if h.get("street") == "preflop"]
+        opp_acts = [h["action"] for h in pre if h.get("actor") == "opp"]
+        if not opp_acts:
+            return None
+        my_raises = sum(1 for h in pre if h.get("actor") == "me" and h.get("action") == "raise")
+        opp_raises = opp_acts.count("raise")
+        o = self.opp
+
+        def top(x):  # strength above which the top fraction x of hands lies
+            return strength_quantile(1.0 - max(0.04, min(0.96, x)))
+
+        if self.seat == "big_blind":  # opponent is the button and acted first
+            if opp_acts[0] == "raise":
+                if opp_raises >= 2:                      # opened, then 4-bet our 3-bet
+                    return RangeWeight(lo=top(0.07))
+                if my_raises >= 1:                       # opened, then called our 3-bet
+                    return RangeWeight(lo=top(o.btn_open_rate * 0.55))
+                return RangeWeight(lo=top(o.btn_open_rate))
+            if opp_acts[0] == "call":                    # limped
+                if opp_raises >= 1:                      # limp then raise
+                    return RangeWeight(lo=top(0.25))
+                if o.opp_btn_hands >= 10 and o.btn_open_rate > 0.15:
+                    return RangeWeight(hi=top(o.btn_open_rate))  # would usually have opened strong hands
+            return None
+        # we are the button
+        if my_raises == 0:                               # we limped
+            if opp_raises >= 1:
+                return RangeWeight(lo=top(max(0.15, o.pfr)))
+            return RangeWeight(hi=top(max(0.10, o.pfr * 0.8)))  # checked: strong hands would have raised
+        if opp_acts[0] == "raise":                       # 3-bet our open
+            if opp_raises >= 2:
+                return RangeWeight(lo=top(0.05))
+            if my_raises >= 2:                           # 3-bet, we 4-bet, they called
+                return RangeWeight(lo=top(o.three_bet_vs_open_rate * 0.6))
+            return RangeWeight(lo=top(o.three_bet_vs_open_rate))
+        if opp_acts[0] == "call":                        # defended the big blind
+            return RangeWeight(lo=top(1.0 - o.fold_to_steal), hi=top(o.three_bet_vs_open_rate))
+        return None
+
     def rollouts(self, full, minimum, time_left):
         """Time-scaled rollouts calibrated for 2-leg per-leg time banks."""
         hands_left = max(1, self.total_hands - self.hand_id + 1)
@@ -367,7 +415,7 @@ class AdaptiveBot:
             time_left = req.get("time_left_ms", 30000)
             rollouts = self.rollouts(220, 40, time_left)
             best_card, _, _ = evaluate_discard_options(
-                hole, board, num_rollouts=rollouts, opp_vpip=self.opp.vpip
+                hole, board, num_rollouts=rollouts, opp_vpip=self.opp.vpip, pre_w=self.pre_w
             )
         return {"type": "discard", "card": best_card}
 
@@ -513,6 +561,8 @@ class AdaptiveBot:
         eff_stack = min(req["my_stack"], req["opp_stack"])
         hist = req.get("history", [])
 
+        if self.pre_w is None:
+            self.pre_w = self.opp_preflop_range(hist)
         pre_raises = [h for h in hist if h["street"] == "preflop" and h["action"] == "raise"]
         is_3bet_pot = len(pre_raises) >= 2
         freq_raiser = self.opp.faced_bet_postflop >= 5 and self.opp.raise_my_bet_rate > 0.20
@@ -526,7 +576,7 @@ class AdaptiveBot:
             if self.cached_flop_eq is None:
                 rollouts = self.rollouts(220, 40, time_left)
                 best_c, best_eq, eq_map = evaluate_discard_options(
-                    self.hole3, board, num_rollouts=rollouts, opp_vpip=self.opp.vpip
+                    self.hole3, board, num_rollouts=rollouts, opp_vpip=self.opp.vpip, pre_w=self.pre_w
                 )
                 self.cached_flop_discard = best_c
                 self.cached_flop_eq = best_eq
@@ -554,6 +604,7 @@ class AdaptiveBot:
                 self.opp_discard,
                 opp_range_bias=opp_bias,
                 num_rollouts=rollouts,
+                pre_w=self.pre_w,
             )
             inter = hole_interaction_level(self.hole2, board)
             full_cat = eval_cards(self.hole2, board) >> 20

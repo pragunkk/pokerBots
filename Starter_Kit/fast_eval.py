@@ -5,6 +5,7 @@ Pre-Evaluated Turn Rollout Engine, and Board Texture Danger Analyzer (v6.2 Champ
 Uses only Python 3.11 standard library.
 """
 
+import math
 import random
 from collections import Counter
 from itertools import combinations
@@ -152,6 +153,53 @@ def preflop_3card_strength(hole_strs):
     return PREFLOP_TABLE_1755.get(key, 0.45)
 
 
+_PRE_STRENGTH_CACHE = {}
+_STRENGTH_SORTED = []
+
+
+def pre_strength_idx(a, b, c):
+    """Preflop table strength of a 3-card hand given as card indices (cached)."""
+    key = (a, b, c) if a < b < c else tuple(sorted((a, b, c)))
+    v = _PRE_STRENGTH_CACHE.get(key)
+    if v is None:
+        v = preflop_3card_strength([ALL_CARDS[key[0]], ALL_CARDS[key[1]], ALL_CARDS[key[2]]])
+        _PRE_STRENGTH_CACHE[key] = v
+    return v
+
+
+def strength_quantile(q):
+    """Strength s such that a fraction q of all 22,100 starting hands is weaker than s."""
+    if not _STRENGTH_SORTED:
+        _STRENGTH_SORTED.extend(sorted(preflop_3card_strength(list(c)) for c in combinations(ALL_CARDS, 3)))
+    q = min(0.999, max(0.0, q))
+    return _STRENGTH_SORTED[int(q * (len(_STRENGTH_SORTED) - 1))]
+
+
+class RangeWeight:
+    """Soft preflop range: how likely an opponent holding a 3-card hand of strength s is to have
+    played the way they did. `lo` = soft floor of the range (weaker hands fold), `hi` = soft cap
+    (stronger hands would have raised). Never returns 0, so a surprising hand is only discounted."""
+
+    __slots__ = ("lo", "hi", "width", "floor", "cap_floor", "_memo")
+
+    def __init__(self, lo=None, hi=None, width=0.045, floor=0.12, cap_floor=0.40):
+        self.lo, self.hi, self.width, self.floor, self.cap_floor = lo, hi, width, floor, cap_floor
+        self._memo = {}
+
+    def __call__(self, s):
+        w = self._memo.get(s)
+        if w is None:
+            w = 1.0
+            if self.lo is not None:
+                z = (s - self.lo) / self.width
+                w = self.floor + (1.0 - self.floor) / (1.0 + math.exp(-max(-30.0, min(30.0, z))))
+            if self.hi is not None:
+                z = (s - self.hi) / self.width
+                w *= 1.0 - (1.0 - self.cap_floor) / (1.0 + math.exp(-max(-30.0, min(30.0, z))))
+            self._memo[s] = w
+        return w
+
+
 def hole_interaction_level(hole_strs, board_strs):
     """
     Board-Relative Hand Interaction Classifier:
@@ -274,7 +322,7 @@ def board_danger_level(board_strs):
     return min(1.0, danger)
 
 
-def evaluate_discard_options(hole3_strs, flop3_strs, num_rollouts=120, opp_vpip=0.65):
+def evaluate_discard_options(hole3_strs, flop3_strs, num_rollouts=120, opp_vpip=0.65, pre_w=None):
     """
     Evaluates all 3 flop discard choices, combining:
       1. Expected Showdown Equity against opponent's VPIP-filtered range and optimal discard
@@ -302,9 +350,12 @@ def evaluate_discard_options(hole3_strs, flop3_strs, num_rollouts=120, opp_vpip=
         opp0, opp1, opp2, turn, river = sample[0], sample[1], sample[2], sample[3], sample[4]
 
         opp_r_max = max(CARD_RANK[opp0], CARD_RANK[opp1], CARD_RANK[opp2])
-        w = 1.0
-        if opp_vpip < 0.50 and opp_r_max < 10 and CARD_RANK[opp0] != CARD_RANK[opp1]:
-            w = 0.35
+        if pre_w is not None:
+            w = pre_w(pre_strength_idx(opp0, opp1, opp2))
+        else:
+            w = 1.0
+            if opp_vpip < 0.50 and opp_r_max < 10 and CARD_RANK[opp0] != CARD_RANK[opp1]:
+                w = 0.35
 
         opp_pairs = ((opp1, opp2), (opp0, opp2), (opp0, opp1))
         best_opp_flop = -1
@@ -344,7 +395,7 @@ def evaluate_discard_options(hole3_strs, flop3_strs, num_rollouts=120, opp_vpip=
     return options[best_i][0], equities[options[best_i][0]], equities
 
 
-def exact_river_equity(hole_idxs, board_idxs, rem_deck, opp_disc_idx, opp_range_bias=0.0):
+def exact_river_equity(hole_idxs, board_idxs, rem_deck, opp_disc_idx, opp_range_bias=0.0, pre_w=None):
     """
     Zero-Variance Combinatorial Enumeration over opponent 2-card hands on the River!
     Precomputes single-card flop-discard scores in 43 calls and my_score in 1 call.
@@ -394,6 +445,9 @@ def exact_river_equity(hole_idxs, board_idxs, rem_deck, opp_disc_idx, opp_range_
                 if s0 == opp_disc_suit and s1 == opp_disc_suit:
                     weight *= 0.30
 
+            if pre_w is not None and opp_disc_idx is not None:
+                weight *= pre_w(pre_strength_idx(opp0, opp1, opp_disc_idx))
+
             opp_score = eval7_idx((opp0, opp1, b0, b1, b2, b3, b4))
 
             if opp_range_bias > 0.05:
@@ -417,7 +471,7 @@ def exact_river_equity(hole_idxs, board_idxs, rem_deck, opp_disc_idx, opp_range_
 
 
 def post_discard_equity(hole2_strs, board_strs, my_discard_str, opp_discard_str,
-                        opp_range_bias=0.0, num_rollouts=180):
+                        opp_range_bias=0.0, num_rollouts=180, pre_w=None):
     """
     On the River (5 board cards): Uses `exact_river_equity` (zero-variance combinatorial solver!).
     On the Turn (4 board cards): Uses pre-evaluated flop discard lookup (`alt_flop_score`) for 3x faster rollouts!
@@ -434,7 +488,7 @@ def post_discard_equity(hole2_strs, board_strs, my_discard_str, opp_discard_str,
     rem_deck = [i for i in range(52) if i not in dead_idxs]
 
     if len(board_idxs) == 5:
-        return exact_river_equity(hole_idxs, board_idxs, rem_deck, opp_disc_idx, opp_range_bias)
+        return exact_river_equity(hole_idxs, board_idxs, rem_deck, opp_disc_idx, opp_range_bias, pre_w)
 
     b0, b1, b2, b3 = board_idxs[0], board_idxs[1], board_idxs[2], board_idxs[3]
     opp_disc_rank = CARD_RANK[opp_disc_idx] if opp_disc_idx is not None else 2
@@ -470,6 +524,8 @@ def post_discard_equity(hole2_strs, board_strs, my_discard_str, opp_discard_str,
                     weight *= 0.15
             if s0 == opp_disc_suit and s1 == opp_disc_suit:
                 weight *= 0.30
+            if pre_w is not None:
+                weight *= pre_w(pre_strength_idx(opp0, opp1, opp_disc_idx))
 
         my_score = eval7_idx((hole_idxs[0], hole_idxs[1], b0, b1, b2, b3, river))
         opp_score = eval7_idx((opp0, opp1, b0, b1, b2, b3, river))

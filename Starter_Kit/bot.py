@@ -1769,6 +1769,7 @@ Pre-Evaluated Turn Rollout Engine, and Board Texture Danger Analyzer (v6.2 Champ
 Uses only Python 3.11 standard library.
 """
 
+import math
 import random
 from collections import Counter
 from itertools import combinations
@@ -1915,6 +1916,53 @@ def preflop_3card_strength(hole_strs):
     return PREFLOP_TABLE_1755.get(key, 0.45)
 
 
+_PRE_STRENGTH_CACHE = {}
+_STRENGTH_SORTED = []
+
+
+def pre_strength_idx(a, b, c):
+    """Preflop table strength of a 3-card hand given as card indices (cached)."""
+    key = (a, b, c) if a < b < c else tuple(sorted((a, b, c)))
+    v = _PRE_STRENGTH_CACHE.get(key)
+    if v is None:
+        v = preflop_3card_strength([ALL_CARDS[key[0]], ALL_CARDS[key[1]], ALL_CARDS[key[2]]])
+        _PRE_STRENGTH_CACHE[key] = v
+    return v
+
+
+def strength_quantile(q):
+    """Strength s such that a fraction q of all 22,100 starting hands is weaker than s."""
+    if not _STRENGTH_SORTED:
+        _STRENGTH_SORTED.extend(sorted(preflop_3card_strength(list(c)) for c in combinations(ALL_CARDS, 3)))
+    q = min(0.999, max(0.0, q))
+    return _STRENGTH_SORTED[int(q * (len(_STRENGTH_SORTED) - 1))]
+
+
+class RangeWeight:
+    """Soft preflop range: how likely an opponent holding a 3-card hand of strength s is to have
+    played the way they did. `lo` = soft floor of the range (weaker hands fold), `hi` = soft cap
+    (stronger hands would have raised). Never returns 0, so a surprising hand is only discounted."""
+
+    __slots__ = ("lo", "hi", "width", "floor", "cap_floor", "_memo")
+
+    def __init__(self, lo=None, hi=None, width=0.045, floor=0.12, cap_floor=0.40):
+        self.lo, self.hi, self.width, self.floor, self.cap_floor = lo, hi, width, floor, cap_floor
+        self._memo = {}
+
+    def __call__(self, s):
+        w = self._memo.get(s)
+        if w is None:
+            w = 1.0
+            if self.lo is not None:
+                z = (s - self.lo) / self.width
+                w = self.floor + (1.0 - self.floor) / (1.0 + math.exp(-max(-30.0, min(30.0, z))))
+            if self.hi is not None:
+                z = (s - self.hi) / self.width
+                w *= 1.0 - (1.0 - self.cap_floor) / (1.0 + math.exp(-max(-30.0, min(30.0, z))))
+            self._memo[s] = w
+        return w
+
+
 def hole_interaction_level(hole_strs, board_strs):
     """
     Board-Relative Hand Interaction Classifier:
@@ -2037,7 +2085,7 @@ def board_danger_level(board_strs):
     return min(1.0, danger)
 
 
-def evaluate_discard_options(hole3_strs, flop3_strs, num_rollouts=120, opp_vpip=0.65):
+def evaluate_discard_options(hole3_strs, flop3_strs, num_rollouts=120, opp_vpip=0.65, pre_w=None):
     """
     Evaluates all 3 flop discard choices, combining:
       1. Expected Showdown Equity against opponent's VPIP-filtered range and optimal discard
@@ -2065,9 +2113,12 @@ def evaluate_discard_options(hole3_strs, flop3_strs, num_rollouts=120, opp_vpip=
         opp0, opp1, opp2, turn, river = sample[0], sample[1], sample[2], sample[3], sample[4]
 
         opp_r_max = max(CARD_RANK[opp0], CARD_RANK[opp1], CARD_RANK[opp2])
-        w = 1.0
-        if opp_vpip < 0.50 and opp_r_max < 10 and CARD_RANK[opp0] != CARD_RANK[opp1]:
-            w = 0.35
+        if pre_w is not None:
+            w = pre_w(pre_strength_idx(opp0, opp1, opp2))
+        else:
+            w = 1.0
+            if opp_vpip < 0.50 and opp_r_max < 10 and CARD_RANK[opp0] != CARD_RANK[opp1]:
+                w = 0.35
 
         opp_pairs = ((opp1, opp2), (opp0, opp2), (opp0, opp1))
         best_opp_flop = -1
@@ -2107,7 +2158,7 @@ def evaluate_discard_options(hole3_strs, flop3_strs, num_rollouts=120, opp_vpip=
     return options[best_i][0], equities[options[best_i][0]], equities
 
 
-def exact_river_equity(hole_idxs, board_idxs, rem_deck, opp_disc_idx, opp_range_bias=0.0):
+def exact_river_equity(hole_idxs, board_idxs, rem_deck, opp_disc_idx, opp_range_bias=0.0, pre_w=None):
     """
     Zero-Variance Combinatorial Enumeration over opponent 2-card hands on the River!
     Precomputes single-card flop-discard scores in 43 calls and my_score in 1 call.
@@ -2157,6 +2208,9 @@ def exact_river_equity(hole_idxs, board_idxs, rem_deck, opp_disc_idx, opp_range_
                 if s0 == opp_disc_suit and s1 == opp_disc_suit:
                     weight *= 0.30
 
+            if pre_w is not None and opp_disc_idx is not None:
+                weight *= pre_w(pre_strength_idx(opp0, opp1, opp_disc_idx))
+
             opp_score = eval7_idx((opp0, opp1, b0, b1, b2, b3, b4))
 
             if opp_range_bias > 0.05:
@@ -2180,7 +2234,7 @@ def exact_river_equity(hole_idxs, board_idxs, rem_deck, opp_disc_idx, opp_range_
 
 
 def post_discard_equity(hole2_strs, board_strs, my_discard_str, opp_discard_str,
-                        opp_range_bias=0.0, num_rollouts=180):
+                        opp_range_bias=0.0, num_rollouts=180, pre_w=None):
     """
     On the River (5 board cards): Uses `exact_river_equity` (zero-variance combinatorial solver!).
     On the Turn (4 board cards): Uses pre-evaluated flop discard lookup (`alt_flop_score`) for 3x faster rollouts!
@@ -2197,7 +2251,7 @@ def post_discard_equity(hole2_strs, board_strs, my_discard_str, opp_discard_str,
     rem_deck = [i for i in range(52) if i not in dead_idxs]
 
     if len(board_idxs) == 5:
-        return exact_river_equity(hole_idxs, board_idxs, rem_deck, opp_disc_idx, opp_range_bias)
+        return exact_river_equity(hole_idxs, board_idxs, rem_deck, opp_disc_idx, opp_range_bias, pre_w)
 
     b0, b1, b2, b3 = board_idxs[0], board_idxs[1], board_idxs[2], board_idxs[3]
     opp_disc_rank = CARD_RANK[opp_disc_idx] if opp_disc_idx is not None else 2
@@ -2233,6 +2287,8 @@ def post_discard_equity(hole2_strs, board_strs, my_discard_str, opp_discard_str,
                     weight *= 0.15
             if s0 == opp_disc_suit and s1 == opp_disc_suit:
                 weight *= 0.30
+            if pre_w is not None:
+                weight *= pre_w(pre_strength_idx(opp0, opp1, opp_disc_idx))
 
         my_score = eval7_idx((hole_idxs[0], hole_idxs[1], b0, b1, b2, b3, river))
         opp_score = eval7_idx((opp0, opp1, b0, b1, b2, b3, river))
@@ -2560,12 +2616,14 @@ class AdaptiveBot:
         self.cached_flop_discard = None
         self.cached_flop_eq = None
         self.cached_flop_eq_map = None
+        self.pre_w = None
 
     def handle_init(self, msg):
         self.total_hands = msg.get("total_hands", 200)
         self.starting_stack = msg.get("starting_stack", 200)
         self.time_bank_ms = msg.get("time_bank_ms", 30000)
         self.cap = 1000 if self.total_hands >= 500 else 400
+        strength_quantile(0.5)  # build the strength distribution now, while the clock is not running
 
     def handle_new_hand(self, msg):
         self.hand_id = msg["hand_id"]
@@ -2577,6 +2635,7 @@ class AdaptiveBot:
         self.cached_flop_discard = None
         self.cached_flop_eq = None
         self.cached_flop_eq_map = None
+        self.pre_w = None
         self.opp.start_hand(self.seat)
 
     def handle_discard_result(self, msg):
@@ -2600,6 +2659,49 @@ class AdaptiveBot:
                 if inter <= 1:
                     self.opp.showdown_bluffs += 1
 
+    def opp_preflop_range(self, hist):
+        """Soft model of the opponent's starting-hand range from how they played preflop this hand.
+        Thresholds come from their own measured frequencies, mapped onto the strength distribution
+        of all 22,100 starting hands (top x% of hands -> strength_quantile(1 - x))."""
+        pre = [h for h in hist if h.get("street") == "preflop"]
+        opp_acts = [h["action"] for h in pre if h.get("actor") == "opp"]
+        if not opp_acts:
+            return None
+        my_raises = sum(1 for h in pre if h.get("actor") == "me" and h.get("action") == "raise")
+        opp_raises = opp_acts.count("raise")
+        o = self.opp
+
+        def top(x):  # strength above which the top fraction x of hands lies
+            return strength_quantile(1.0 - max(0.04, min(0.96, x)))
+
+        if self.seat == "big_blind":  # opponent is the button and acted first
+            if opp_acts[0] == "raise":
+                if opp_raises >= 2:                      # opened, then 4-bet our 3-bet
+                    return RangeWeight(lo=top(0.07))
+                if my_raises >= 1:                       # opened, then called our 3-bet
+                    return RangeWeight(lo=top(o.btn_open_rate * 0.55))
+                return RangeWeight(lo=top(o.btn_open_rate))
+            if opp_acts[0] == "call":                    # limped
+                if opp_raises >= 1:                      # limp then raise
+                    return RangeWeight(lo=top(0.25))
+                if o.opp_btn_hands >= 10 and o.btn_open_rate > 0.15:
+                    return RangeWeight(hi=top(o.btn_open_rate))  # would usually have opened strong hands
+            return None
+        # we are the button
+        if my_raises == 0:                               # we limped
+            if opp_raises >= 1:
+                return RangeWeight(lo=top(max(0.15, o.pfr)))
+            return RangeWeight(hi=top(max(0.10, o.pfr * 0.8)))  # checked: strong hands would have raised
+        if opp_acts[0] == "raise":                       # 3-bet our open
+            if opp_raises >= 2:
+                return RangeWeight(lo=top(0.05))
+            if my_raises >= 2:                           # 3-bet, we 4-bet, they called
+                return RangeWeight(lo=top(o.three_bet_vs_open_rate * 0.6))
+            return RangeWeight(lo=top(o.three_bet_vs_open_rate))
+        if opp_acts[0] == "call":                        # defended the big blind
+            return RangeWeight(lo=top(1.0 - o.fold_to_steal), hi=top(o.three_bet_vs_open_rate))
+        return None
+
     def rollouts(self, full, minimum, time_left):
         """Time-scaled rollouts calibrated for 2-leg per-leg time banks."""
         hands_left = max(1, self.total_hands - self.hand_id + 1)
@@ -2616,7 +2718,7 @@ class AdaptiveBot:
             time_left = req.get("time_left_ms", 30000)
             rollouts = self.rollouts(220, 40, time_left)
             best_card, _, _ = evaluate_discard_options(
-                hole, board, num_rollouts=rollouts, opp_vpip=self.opp.vpip
+                hole, board, num_rollouts=rollouts, opp_vpip=self.opp.vpip, pre_w=self.pre_w
             )
         return {"type": "discard", "card": best_card}
 
@@ -2762,6 +2864,8 @@ class AdaptiveBot:
         eff_stack = min(req["my_stack"], req["opp_stack"])
         hist = req.get("history", [])
 
+        if self.pre_w is None:
+            self.pre_w = self.opp_preflop_range(hist)
         pre_raises = [h for h in hist if h["street"] == "preflop" and h["action"] == "raise"]
         is_3bet_pot = len(pre_raises) >= 2
         freq_raiser = self.opp.faced_bet_postflop >= 5 and self.opp.raise_my_bet_rate > 0.20
@@ -2775,7 +2879,7 @@ class AdaptiveBot:
             if self.cached_flop_eq is None:
                 rollouts = self.rollouts(220, 40, time_left)
                 best_c, best_eq, eq_map = evaluate_discard_options(
-                    self.hole3, board, num_rollouts=rollouts, opp_vpip=self.opp.vpip
+                    self.hole3, board, num_rollouts=rollouts, opp_vpip=self.opp.vpip, pre_w=self.pre_w
                 )
                 self.cached_flop_discard = best_c
                 self.cached_flop_eq = best_eq
@@ -2803,6 +2907,7 @@ class AdaptiveBot:
                 self.opp_discard,
                 opp_range_bias=opp_bias,
                 num_rollouts=rollouts,
+                pre_w=self.pre_w,
             )
             inter = hole_interaction_level(self.hole2, board)
             full_cat = eval_cards(self.hole2, board) >> 20
