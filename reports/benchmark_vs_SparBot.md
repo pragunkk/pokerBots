@@ -7,37 +7,37 @@
 ## 1. Stage 1 Match-by-Match Standings (400 Hands / Match, Cap $C = 400$)
 | Match # | Seed | Winner | Raw Net (A) | Capped Delta (A) | Time A / B (2 Legs) | Notices A / B |
 | :--- | :--- | :--- | :---: | :---: | :---: | :---: |
-| Match #1 | `1001` | B (spar_bot.py) | `-506` | `-400` |  2.76s /  6.09s | 0 / 0 |
-| Match #2 | `1102` | B (spar_bot.py) | `-586` | `-400` |  2.97s /  6.03s | 0 / 0 |
-| Match #3 | `1203` | **A (bot.py)** | `+97` | `+97` |  2.69s /  5.77s | 0 / 0 |
-| Match #4 | `1304` | **A (bot.py)** | `+389` | `+389` |  2.88s /  6.29s | 0 / 0 |
-| Match #5 | `1405` | B (spar_bot.py) | `-578` | `-400` |  2.62s /  5.69s | 0 / 0 |
-| **Stage 1 Total** | **5 Matches** | **2.0 / 5 (2W-0D-3L)** | **`-1184` (-0.592/h)** | **Score_cap = `-0.3570`** | **—** | **0 / 0** |
+| Match #1 | `1001` | **A (bot.py)** | `+689` | `+400` |  0.48s /  3.89s | 0 / 0 |
+| Match #2 | `1102` | B (spar_bot.py) | `-674` | `-400` |  0.40s /  3.16s | 0 / 0 |
+| Match #3 | `1203` | B (spar_bot.py) | `-72` | `-72` |  0.37s /  2.97s | 0 / 0 |
+| Match #4 | `1304` | B (spar_bot.py) | `-63` | `-63` |  0.41s /  3.17s | 0 / 0 |
+| Match #5 | `1405` | **A (bot.py)** | `+172` | `+172` |  0.40s /  3.18s | 0 / 0 |
+| **Stage 1 Total** | **5 Matches** | **2.0 / 5 (2W-0D-3L)** | **`+52` (+0.026/h)** | **Score_cap = `+0.0185`** | **—** | **0 / 0** |
 
 ## 2. Stage 2 Finals Standings (1,000 Hands / Match, Cap $C = 1000$)
 | Match # | Seed | Winner | Raw Net (A) | Capped Delta (A) | Time A / B (2 Legs) | Notices A / B |
 | :--- | :--- | :--- | :---: | :---: | :---: | :---: |
-| Match #1 | `777` | B (spar_bot.py) | `-785` | `-785` | 10.04s / 21.38s | 0 / 0 |
-| Match #2 | `888` | B (spar_bot.py) | `-755` | `-755` | 10.92s / 22.79s | 0 / 0 |
-| **Stage 2 Total** | **2 Matches** | **0.0 / 2 (0W-0D-2L)** | **`-1540` (-0.770/h)** | **Score_cap = `-0.7700`** | **—** | **0 / 0** |
+| Match #1 | `777` | B (spar_bot.py) | `-183` | `-183` |  2.27s / 18.33s | 0 / 0 |
+| Match #2 | `888` | **A (bot.py)** | `+202` | `+202` |  2.45s / 19.50s | 0 / 0 |
+| **Stage 2 Total** | **2 Matches** | **1.0 / 2 (1W-0D-1L)** | **`+19` (+0.009/h)** | **Score_cap = `+0.0095`** | **—** | **0 / 0** |
 
 ## 3. Overall Tournament Aggregate Summary
 - **Total Hands Played**: `4000` hands across `7` matches
-- **Match Points**: **`2.0 / 7` (28.6% Win Rate)**
-- **Official Score_cap**: **`-0.5635` / hand**
-- **Total Raw Net Chips**: **`-2724` chips (`-0.681` chips/hand)**
+- **Match Points**: **`3.0 / 7` (42.9% Win Rate)**
+- **Official Score_cap**: **`+0.0140` / hand**
+- **Total Raw Net Chips**: **`+71` chips (`+0.018` chips/hand)**
 
 ## 4. Deep Hand-Level & Street-by-Street Forensics
 | Metric Category | Hero: `bot.py` (A) | Opponent: `spar_bot.py` (B) | Strategic Insight |
 | :--- | :---: | :---: | :--- |
-| **Button Open Frequency** | `81.2%` (1624/2000) | `61.3%` (1225/2000) | Preflop steal aggression |
-| **Fold to Preflop Open (BB)** | `28.8%` (353/1225) | `10.9%` (177/1624) | Big Blind defense tightness |
-| **Preflop 3-Bet Frequency** | `188` times | `306` times | Preflop re-raise pressure |
-| **Total Folds Across Hands** | `1664` (41.6%) | `1644` (41.1%) | Overall fold frequency |
-| **Preflop Folds** | `732` (18.3%) | `594` (14.8%) | Hand surrendered preflop |
-| **Flop Folds** | `160` | `632` | C-bet / probe fold frequency |
-| **Turn Folds** | `499` | `196` | Turn barrel fold frequency |
-| **River Folds** | `273` | `222` | River fold frequency |
-| **Showdown Reach Frequency** | `692` hands (17.3%) | `692` hands (17.3%) | Hands reaching final showdown |
-| **Showdowns Won** | `325` (47.0%) | `314` (45.4%) | Showdown equity conversion |
-| **Big Pots Won (>= 40 chips)** | **`125`** pots | **`127`** pots | High-leverage stack-off edge |
+| **Button Open Frequency** | `75.0%` (1499/2000) | `61.2%` (1223/2000) | Preflop steal aggression |
+| **Fold to Preflop Open (BB)** | `27.5%` (336/1223) | `12.6%` (189/1499) | Big Blind defense tightness |
+| **Preflop 3-Bet Frequency** | `218` times | `251` times | Preflop re-raise pressure |
+| **Total Folds Across Hands** | `1749` (43.7%) | `1603` (40.1%) | Overall fold frequency |
+| **Preflop Folds** | `726` (18.1%) | `625` (15.6%) | Hand surrendered preflop |
+| **Flop Folds** | `343` | `582` | C-bet / probe fold frequency |
+| **Turn Folds** | `385` | `191` | Turn barrel fold frequency |
+| **River Folds** | `295` | `205` | River fold frequency |
+| **Showdown Reach Frequency** | `648` hands (16.2%) | `648` hands (16.2%) | Hands reaching final showdown |
+| **Showdowns Won** | `325` (50.2%) | `274` (42.3%) | Showdown equity conversion |
+| **Big Pots Won (>= 40 chips)** | **`133`** pots | **`91`** pots | High-leverage stack-off edge |

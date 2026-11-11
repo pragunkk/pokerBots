@@ -1,14 +1,15 @@
 """
-Ultra-fast Hand Evaluator, Precomputed 1,755 Canonical 3-Card Preflop Evaluator,
+Ultra-fast Hand Evaluator with Startup O(1) Lookup Tables (POW5 + Flush Bitmask),
+Precomputed 1,755 Canonical 3-Card Preflop Evaluator, Soft Sigmoid Preflop Range Weighting,
 Post-Flop Discard Optimizer, Exact Zero-Variance Combinatorial River Solver,
-Pre-Evaluated Turn Rollout Engine, and Board Texture Danger Analyzer (v6.2 Championship Engine).
+Pre-Evaluated Turn Rollout Engine, and Board Texture Danger Analyzer (v8 Championship Engine).
 Uses only Python 3.11 standard library.
 """
 
 import math
 import random
 from collections import Counter
-from itertools import combinations
+from itertools import combinations, combinations_with_replacement
 from preflop_table import PREFLOP_TABLE_1755
 
 RANKS = "23456789TJQKA"
@@ -20,20 +21,26 @@ CARD_IDX = {c: i for i, c in enumerate(ALL_CARDS)}
 
 CARD_RANK = tuple(RANK_VAL[c[0]] for c in ALL_CARDS)
 CARD_SUIT = tuple(SUIT_VAL[c[1]] for c in ALL_CARDS)
+CARD_BIT = tuple(1 << (i // 4) for i in range(52))
+
+POW5 = tuple(5 ** i for i in range(13))
+CARD_POW5 = tuple(POW5[i // 4] for i in range(52))
+SUITADD = tuple(1 << (4 * (i & 3)) for i in range(52))
 
 COMBOS_7_5 = tuple(combinations(range(7), 5))
 COMBOS_6_5 = tuple(combinations(range(6), 5))
 
+NON_FLUSH_LUT = {}
+FLUSH_BIT_LUT = {}
+N7 = {}
+N6 = {}
+FL = {}
+FSUIT = [-1] * 65536
+_TABLES_READY = False
 
-def eval5_idx(c0, c1, c2, c3, c4):
-    """
-    Fast 5-card evaluator taking 5 integer card indices (0..51).
-    Returns a single integer score (higher is strictly better).
-    """
-    r0, r1, r2, r3, r4 = CARD_RANK[c0], CARD_RANK[c1], CARD_RANK[c2], CARD_RANK[c3], CARD_RANK[c4]
-    s_flush = (CARD_SUIT[c0] == CARD_SUIT[c1] == CARD_SUIT[c2] == CARD_SUIT[c3] == CARD_SUIT[c4])
 
-    # Sort 5 ranks descending using fast sorting network
+def _eval5_from_ranks(r0, r1, r2, r3, r4, s_flush):
+    """Exact 5-card score in the canonical bit layout (cat << 20) | tiebreakers (ranks 2..14)."""
     if r0 < r1: r0, r1 = r1, r0
     if r3 < r4: r3, r4 = r4, r3
     if r2 < r4: r2, r4 = r4, r2
@@ -44,7 +51,6 @@ def eval5_idx(c0, c1, c2, c3, c4):
     if r1 < r3: r1, r3 = r3, r1
     if r1 < r2: r1, r2 = r2, r1
 
-    # Check if all 5 ranks are distinct
     if r0 != r1 and r1 != r2 and r2 != r3 and r3 != r4:
         straight_high = 0
         if r0 - r4 == 4:
@@ -60,13 +66,11 @@ def eval5_idx(c0, c1, c2, c3, c4):
             return (5 << 20) | (r0 << 16) | (r1 << 12) | (r2 << 8) | (r3 << 4) | r4
         return (r0 << 16) | (r1 << 12) | (r2 << 8) | (r3 << 4) | r4
 
-    # Four of a kind
     if r0 == r3:
         return (7 << 20) | (r0 << 4) | r4
     if r1 == r4:
         return (7 << 20) | (r1 << 4) | r0
 
-    # Full house or Three of a kind
     if r0 == r2:
         if r3 == r4:
             return (6 << 20) | (r0 << 4) | r3
@@ -78,7 +82,6 @@ def eval5_idx(c0, c1, c2, c3, c4):
             return (6 << 20) | (r2 << 4) | r0
         return (3 << 20) | (r2 << 8) | (r0 << 4) | r1
 
-    # Two pair or One pair
     if r0 == r1:
         if r2 == r3:
             return (2 << 20) | (r0 << 8) | (r2 << 4) | r4
@@ -94,14 +97,112 @@ def eval5_idx(c0, c1, c2, c3, c4):
     return (1 << 20) | (r3 << 12) | (r0 << 8) | (r1 << 4) | r2
 
 
+def init_fast_tables():
+    """Precomputes O(1) 5-, 6-, and 7-card lookup tables during the free startup window."""
+    global _TABLES_READY
+    if _TABLES_READY:
+        return
+    for r0 in range(13):
+        p0 = POW5[r0]
+        for r1 in range(r0, 13):
+            p1 = p0 + POW5[r1]
+            for r2 in range(r1, 13):
+                p2 = p1 + POW5[r2]
+                for r3 in range(r2, 13):
+                    p3 = p2 + POW5[r3]
+                    for r4 in range(r3, 13):
+                        if r0 == r4:
+                            continue
+                        key = p3 + POW5[r4]
+                        NON_FLUSH_LUT[key] = _eval5_from_ranks(r0 + 2, r1 + 2, r2 + 2, r3 + 2, r4 + 2, False)
+                        if r0 < r1 < r2 < r3 < r4:
+                            mask = (1 << r0) | (1 << r1) | (1 << r2) | (1 << r3) | (1 << r4)
+                            FLUSH_BIT_LUT[mask] = _eval5_from_ranks(r0 + 2, r1 + 2, r2 + 2, r3 + 2, r4 + 2, True)
+
+    nf = NON_FLUSH_LUT
+    for combo in combinations_with_replacement(range(13), 7):
+        if combo[0] == combo[4] or combo[1] == combo[5] or combo[2] == combo[6]:
+            continue
+        p = [POW5[r] for r in combo]
+        best = 0
+        for i0, i1, i2, i3, i4 in COMBOS_7_5:
+            v = nf[p[i0] + p[i1] + p[i2] + p[i3] + p[i4]]
+            if v > best:
+                best = v
+        N7[sum(p)] = best
+
+    for combo in combinations_with_replacement(range(13), 6):
+        if combo[0] == combo[4] or combo[1] == combo[5]:
+            continue
+        p = [POW5[r] for r in combo]
+        best = 0
+        for i0, i1, i2, i3, i4 in COMBOS_6_5:
+            v = nf[p[i0] + p[i1] + p[i2] + p[i3] + p[i4]]
+            if v > best:
+                best = v
+        N6[sum(p)] = best
+
+    fb = FLUSH_BIT_LUT
+    for mask in range(8192):
+        bits = [i for i in range(13) if (mask >> i) & 1]
+        if len(bits) < 5:
+            continue
+        best = 0
+        for sub in combinations(bits, 5):
+            v = fb[(1 << sub[0]) | (1 << sub[1]) | (1 << sub[2]) | (1 << sub[3]) | (1 << sub[4])]
+            if v > best:
+                best = v
+        FL[mask] = best
+
+    for s in range(65536):
+        for su in range(4):
+            if ((s >> (4 * su)) & 15) >= 5:
+                FSUIT[s] = su
+                break
+
+    _TABLES_READY = True
+
+
+init_fast_tables()
+
+
+def eval5_idx(c0, c1, c2, c3, c4):
+    """O(1) 5-card evaluator taking 5 integer card indices (0..51)."""
+    if CARD_SUIT[c0] == CARD_SUIT[c1] == CARD_SUIT[c2] == CARD_SUIT[c3] == CARD_SUIT[c4]:
+        return FLUSH_BIT_LUT[CARD_BIT[c0] | CARD_BIT[c1] | CARD_BIT[c2] | CARD_BIT[c3] | CARD_BIT[c4]]
+    return NON_FLUSH_LUT[CARD_POW5[c0] + CARD_POW5[c1] + CARD_POW5[c2] + CARD_POW5[c3] + CARD_POW5[c4]]
+
+
+def eval6_idx(cards6):
+    """O(1) 6-card evaluator taking 6 integer card indices (0..51)."""
+    a, b, c, d, e, f = cards6
+    v = N6[CARD_POW5[a] + CARD_POW5[b] + CARD_POW5[c] + CARD_POW5[d] + CARD_POW5[e] + CARD_POW5[f]]
+    fs = FSUIT[SUITADD[a] + SUITADD[b] + SUITADD[c] + SUITADD[d] + SUITADD[e] + SUITADD[f]]
+    if fs >= 0:
+        m = 0
+        for x in cards6:
+            if (x & 3) == fs:
+                m |= CARD_BIT[x]
+        fv = FL[m]
+        if fv > v:
+            v = fv
+    return v
+
+
 def eval7_idx(cards7):
-    """Best 5-card hand score out of 7 card indices."""
-    best = 0
-    for i0, i1, i2, i3, i4 in COMBOS_7_5:
-        s = eval5_idx(cards7[i0], cards7[i1], cards7[i2], cards7[i3], cards7[i4])
-        if s > best:
-            best = s
-    return best
+    """O(1) Best 5-card hand score out of 7 card indices."""
+    a, b, c, d, e, f, g = cards7
+    v = N7[CARD_POW5[a] + CARD_POW5[b] + CARD_POW5[c] + CARD_POW5[d] + CARD_POW5[e] + CARD_POW5[f] + CARD_POW5[g]]
+    fs = FSUIT[SUITADD[a] + SUITADD[b] + SUITADD[c] + SUITADD[d] + SUITADD[e] + SUITADD[f] + SUITADD[g]]
+    if fs >= 0:
+        m = 0
+        for x in cards7:
+            if (x & 3) == fs:
+                m |= CARD_BIT[x]
+        fv = FL[m]
+        if fv > v:
+            v = fv
+    return v
 
 
 def eval_cards(hole_strs, board_strs):
@@ -111,12 +212,7 @@ def eval_cards(hole_strs, board_strs):
     if n == 7:
         return eval7_idx(idxs)
     elif n == 6:
-        best = 0
-        for i0, i1, i2, i3, i4 in COMBOS_6_5:
-            s = eval5_idx(idxs[i0], idxs[i1], idxs[i2], idxs[i3], idxs[i4])
-            if s > best:
-                best = s
-        return best
+        return eval6_idx(idxs)
     elif n == 5:
         return eval5_idx(idxs[0], idxs[1], idxs[2], idxs[3], idxs[4])
     return 0
@@ -268,7 +364,7 @@ def hole_interaction_level(hole_strs, board_strs):
 
 
 def has_strong_draw(hole_strs, board_strs):
-    """Returns True if hole_strs + board_strs has a 4-flush or 4-straight draw on Flop/Turn."""
+    """Returns True if hole_strs + board_strs has a 4-flush draw (9 outs) or 8-out straight draw (OESD / double-gutshot)."""
     if len(board_strs) >= 5:
         return False
     all_c = list(hole_strs) + list(board_strs)
@@ -280,10 +376,23 @@ def has_strong_draw(hole_strs, board_strs):
     if 14 in ranks:
         ranks = [1] + ranks
     hole_r = {RANK_VAL[c[0]] for c in hole_strs}
-    for i in range(len(ranks)):
-        window = [r for r in ranks if 0 <= r - ranks[i] <= 4]
-        if len(window) >= 4 and any(hr in window for hr in hole_r):
-            return True
+    if 14 in hole_r:
+        hole_r = hole_r | {1}
+    # 1. Open-ended straight draw (4 consecutive ranks with both ends open: 2 <= low and high <= 13)
+    for i in range(len(ranks) - 3):
+        if ranks[i + 3] - ranks[i] == 3 and ranks[i] >= 2 and ranks[i + 3] <= 13:
+            if any(ranks[i] <= hr <= ranks[i + 3] for hr in hole_r):
+                return True
+    # 2. Double-gutshot (two distinct missing inside ranks that complete a 5-card straight)
+    gutshot_outs = set()
+    rank_set = set(ranks)
+    for low in range(1, 11):
+        present = [r for r in range(low, low + 5) if r in rank_set]
+        if len(present) == 4 and any(low <= hr <= low + 4 for hr in hole_r):
+            missing = (set(range(low, low + 5)) - set(present)).pop()
+            gutshot_outs.add(missing)
+    if len(gutshot_outs) >= 2:
+        return True
     return False
 
 
@@ -322,10 +431,10 @@ def board_danger_level(board_strs):
     return min(1.0, danger)
 
 
-def evaluate_discard_options(hole3_strs, flop3_strs, num_rollouts=120, opp_vpip=0.65, pre_w=None):
+def evaluate_discard_options(hole3_strs, flop3_strs, num_rollouts=220, opp_vpip=0.65, pre_w=None):
     """
     Evaluates all 3 flop discard choices, combining:
-      1. Expected Showdown Equity against opponent's VPIP-filtered range and optimal discard
+      1. Expected Showdown Equity against opponent's VPIP/RangeWeight-filtered range and optimal discard
       2. Nut-Potential ($P_{pot}$) Implied-Odds Bonus
       3. Deterministic Flop Made-Hand & Kicker Tie-Breaker
     """
@@ -398,7 +507,7 @@ def evaluate_discard_options(hole3_strs, flop3_strs, num_rollouts=120, opp_vpip=
 def exact_river_equity(hole_idxs, board_idxs, rem_deck, opp_disc_idx, opp_range_bias=0.0, pre_w=None):
     """
     Zero-Variance Combinatorial Enumeration over opponent 2-card hands on the River!
-    Precomputes single-card flop-discard scores in 43 calls and my_score in 1 call.
+    Precomputes single-card flop-discard scores in 43 calls and my_score in 1 O(1) lookup.
     """
     n_rem = len(rem_deck)
     b0, b1, b2, b3, b4 = board_idxs[0], board_idxs[1], board_idxs[2], board_idxs[3], board_idxs[4]
@@ -471,10 +580,10 @@ def exact_river_equity(hole_idxs, board_idxs, rem_deck, opp_disc_idx, opp_range_
 
 
 def post_discard_equity(hole2_strs, board_strs, my_discard_str, opp_discard_str,
-                        opp_range_bias=0.0, num_rollouts=180, pre_w=None):
+                        opp_range_bias=0.0, num_rollouts=240, pre_w=None):
     """
     On the River (5 board cards): Uses `exact_river_equity` (zero-variance combinatorial solver!).
-    On the Turn (4 board cards): Uses pre-evaluated flop discard lookup (`alt_flop_score`) for 3x faster rollouts!
+    On the Turn (4 board cards): Uses O(1) N7 lookup tables + pre-evaluated flop discard lookup!
     """
     hole_idxs = [CARD_IDX[c] for c in hole2_strs]
     board_idxs = [CARD_IDX[c] for c in board_strs]
