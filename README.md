@@ -90,3 +90,5 @@ python3 Starter_Kit/run_tournament.py --round-robin \
   opponentBots/bot_Varshith.py \
   opponentBots/bots_Bhavesh.py
 ```
+
+- **v9**: Lowered 3-bet defense scaling trigger to 9%, added Top-Pair turn MDF shield vs. double-barrelers, OOP turn check-raise value traps (`inter >= 3`), and U-shaped polarized turn/river range weighting.
