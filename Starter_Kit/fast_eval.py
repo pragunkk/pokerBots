@@ -562,10 +562,12 @@ def exact_river_equity(hole_idxs, board_idxs, rem_deck, opp_disc_idx, opp_range_
             if opp_range_bias > 0.05:
                 if opp_score >= (2 << 20):
                     weight *= (1.0 + opp_range_bias * 2.0)
+                elif opp_score >= ((1 << 20) | (11 << 16)):
+                    weight *= (1.0 + opp_range_bias * 0.35)
                 elif opp_score >= (1 << 20):
-                    weight *= (1.0 + opp_range_bias * 1.1)
+                    weight *= max(0.45, 1.0 - opp_range_bias * 0.50)
                 else:
-                    weight *= max(0.30, 1.0 - opp_range_bias * 0.7)
+                    weight *= max(0.50, 1.0 - opp_range_bias * 0.25)
             elif opp_range_bias < -0.05:
                 if opp_score < (1 << 20) | (10 << 12):
                     weight *= (1.0 + abs(opp_range_bias) * 1.8)
@@ -702,10 +704,12 @@ def post_discard_equity(hole2_strs, board_strs, my_discard_str, opp_discard_str,
         if opp_range_bias > 0.05:
             if opp_score >= (2 << 20):
                 weight *= (1.0 + opp_range_bias * 2.0)
+            elif opp_score >= ((1 << 20) | (11 << 16)):
+                weight *= (1.0 + opp_range_bias * 0.35)
             elif opp_score >= (1 << 20):
-                weight *= (1.0 + opp_range_bias * 1.1)
+                weight *= max(0.45, 1.0 - opp_range_bias * 0.50)
             else:
-                weight *= max(0.30, 1.0 - opp_range_bias * 0.7)
+                weight *= max(0.50, 1.0 - opp_range_bias * 0.25)
         elif opp_range_bias < -0.05:
             if opp_score < (1 << 20) | (10 << 12):
                 weight *= (1.0 + abs(opp_range_bias) * 1.8)

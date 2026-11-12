@@ -2325,10 +2325,12 @@ def exact_river_equity(hole_idxs, board_idxs, rem_deck, opp_disc_idx, opp_range_
             if opp_range_bias > 0.05:
                 if opp_score >= (2 << 20):
                     weight *= (1.0 + opp_range_bias * 2.0)
+                elif opp_score >= ((1 << 20) | (11 << 16)):
+                    weight *= (1.0 + opp_range_bias * 0.35)
                 elif opp_score >= (1 << 20):
-                    weight *= (1.0 + opp_range_bias * 1.1)
+                    weight *= max(0.45, 1.0 - opp_range_bias * 0.50)
                 else:
-                    weight *= max(0.30, 1.0 - opp_range_bias * 0.7)
+                    weight *= max(0.50, 1.0 - opp_range_bias * 0.25)
             elif opp_range_bias < -0.05:
                 if opp_score < (1 << 20) | (10 << 12):
                     weight *= (1.0 + abs(opp_range_bias) * 1.8)
@@ -2465,10 +2467,12 @@ def post_discard_equity(hole2_strs, board_strs, my_discard_str, opp_discard_str,
         if opp_range_bias > 0.05:
             if opp_score >= (2 << 20):
                 weight *= (1.0 + opp_range_bias * 2.0)
+            elif opp_score >= ((1 << 20) | (11 << 16)):
+                weight *= (1.0 + opp_range_bias * 0.35)
             elif opp_score >= (1 << 20):
-                weight *= (1.0 + opp_range_bias * 1.1)
+                weight *= max(0.45, 1.0 - opp_range_bias * 0.50)
             else:
-                weight *= max(0.30, 1.0 - opp_range_bias * 0.7)
+                weight *= max(0.50, 1.0 - opp_range_bias * 0.25)
         elif opp_range_bias < -0.05:
             if opp_score < (1 << 20) | (10 << 12):
                 weight *= (1.0 + abs(opp_range_bias) * 1.8)
@@ -3025,7 +3029,7 @@ class AdaptiveBot:
         # When an opponent 3-bets our Button opens frequently (> 15%), stop open-raising weak 0.32-0.44 hands
         # into their 3-bets (which loses 5-6 chips on a fold). Instead, limp (call 1 chip) with 0.20-0.44
         # and only open-raise hands strong enough to defend (`>= 0.44`)!
-        if self.opp.faced_preflop_steal >= 6 and self.opp.three_bet_vs_open_rate > 0.15:
+        if self.opp.faced_preflop_steal >= 6 and self.opp.three_bet_vs_open_rate > 0.115:
             open_thresh = max(open_thresh, 0.44)
             limp_thresh = 0.20
 
@@ -3038,7 +3042,7 @@ class AdaptiveBot:
             if strength >= open_thresh and "raise" in legal:
                 if archetype == "CALLING_STATION" and strength > 0.60:
                     size = 7
-                elif self.opp.faced_preflop_steal >= 6 and self.opp.three_bet_vs_open_rate > 0.15:
+                elif self.opp.faced_preflop_steal >= 6 and self.opp.three_bet_vs_open_rate > 0.115:
                     size = 5
                 elif strength >= 0.56:
                     size = 6
@@ -3083,7 +3087,8 @@ class AdaptiveBot:
             target = min(req["max_raise"], max(req["min_raise"], int(opp_bet * 2.8)))
             return {"type": "action", "action": "raise", "amount": target}
 
-        if strength >= call_raise_thresh or (pot_odds <= 0.34 and strength >= 0.35):
+        btn_ip_discount = 0.04 if (self.seat == "button" and self.opp.three_bet_vs_open_rate > 0.11) else 0.0
+        if strength >= (call_raise_thresh - btn_ip_discount) or (pot_odds <= 0.34 and strength >= 0.33):
             return {"type": "action", "action": "call"}
 
         return {"type": "action", "action": "fold"}
@@ -3199,6 +3204,17 @@ class AdaptiveBot:
                     return {"type": "action", "action": "check"}
                 if street == "river" and opp_raised_us_flop and inter == 3 and full_cat == 2 and eq_adj < 0.84:
                     return {"type": "action", "action": "check"}
+
+            # Rule 2a (v9): OOP Turn Check-Raise Trap with monsters vs frequent turn barrelers
+            if (
+                street == "turn"
+                and self.seat != "button"
+                and inter >= 3
+                and eq_adj >= 0.78
+                and self.opp.turn_barrel_rate > 0.38
+                and random.random() < 0.35
+            ):
+                return {"type": "action", "action": "check"}
 
             # Rule 2: Against a MANIAC, check-call medium hands on Flop/Turn so they bluff into us; bet big with monsters
             if archetype == "MANIAC":
@@ -3404,11 +3420,11 @@ class AdaptiveBot:
             if inter == 1 and not has_draw:
                 if is_3bet_pot and bet_to_pot_ratio >= 0.42 and eq_adj < 0.62:
                     return {"type": "action", "action": "fold"}
-                turn_inter1_eq = 0.53 if agg_postflop_opp else 0.63
+                turn_inter1_eq = 0.52 if agg_postflop_opp else 0.63
                 turn_ratio_lim = 0.68 if agg_postflop_opp else 0.55
                 if (bet_to_pot_ratio >= turn_ratio_lim or (opp_was_prev_aggressor and not agg_postflop_opp)) and eq_adj < turn_inter1_eq:
                     return {"type": "action", "action": "fold"}
-            if bet_to_pot_ratio >= 0.80 and inter <= 2 and eq_adj < 0.68:
+            if bet_to_pot_ratio >= 0.80 and (inter <= 1 or (inter == 2 and not agg_postflop_opp)) and eq_adj < 0.68:
                 return {"type": "action", "action": "fold"}
 
         # 4. Raise for Value (when facing an opening bet, my_bet == 0)
