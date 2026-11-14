@@ -1,0 +1,20 @@
+{
+  "btn_open_base": 0.3392,
+  "btn_open_vs_3bet": 0.4424,
+  "btn_limp_floor": 0.2014,
+  "bb_3bet_vs_wide": 0.5473,
+  "bb_defend_base": 0.3531,
+  "flop_probe_freq_high": 0.7265,
+  "flop_probe_freq_base": 0.3853,
+  "flop_probe_size": 0.3356,
+  "turn_float_freq": 0.4427,
+  "val_eq_thresh": 0.5484,
+  "thin_val_size": 0.5675,
+  "strong_val_size": 0.6139,
+  "turn_inter1_mdf_eq": 0.4958,
+  "turn_inter2_mdf_cap": 0.4395,
+  "bluff_raise_trap_eq": 0.5641,
+  "oop_turn_trap_freq": 0.4016,
+  "cfr_blend": 0.32,
+  "exp3_lr": 0.18
+}
