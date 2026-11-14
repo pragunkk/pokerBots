@@ -853,6 +853,22 @@ class AdaptiveBot:
                     return {"type": "action", "action": "call"}
                 return {"type": "action", "action": "fold" if "fold" in legal else "check"}
 
+        # 0b. Price floor for small bets (<= 34% pot, not a raise over our bet). The fold rules below
+        # look at hand type and opponent history but not at the price, so a 2-chip bet into 16 used
+        # to fold out pairs and draws that need only ~11% equity. Against a tiny bet: raise strong
+        # hands for value, otherwise decide purely on equity versus pot odds.
+        if bet_to_pot_ratio <= 0.34 and not opp_raised_our_bet and not opp_check_raised:
+            if inter >= 3 and eq_adj >= 0.80 and "raise" in legal:
+                target = opp_bet + int((pot + to_call) * 0.70)
+                amt = max(req["min_raise"], min(req["max_raise"], target))
+                return {"type": "action", "action": "raise", "amount": amt}
+            need = pot_odds + (0.03 if bet_to_pot_ratio <= 0.25 else 0.08)
+            if eq >= need and "call" in legal:
+                return {"type": "action", "action": "call"}
+            if bet_to_pot_ratio <= 0.25:
+                return {"type": "action", "action": "fold" if "fold" in legal else "check"}
+            # 25-34% pot and not enough equity: fall through to the normal rules below
+
         # 1. Counter-Maniac Call-Down & Trap Engine
         if archetype == "MANIAC":
             if eq_adj >= 0.80 and inter >= 3 and "raise" in legal:
