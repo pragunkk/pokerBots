@@ -71,6 +71,99 @@ def geometric_bet_fraction(pot, eff_stack, streets_left):
     return max(0.45, min(1.15, frac))
 
 
+def rl_exact_river_equity(hole2_strs, board_strs, my_discard_str, opp_discard_str,
+                           opp_range_bias=0.0, pre_w=None, disc_tau=0.65):
+    """
+    Zero-Variance Combinatorial Enumeration over opponent 2-card hands on the River,
+    using an online Boltzmann discard-consistency posterior parameterized by `disc_tau`.
+    """
+    hole_idxs = [CARD_IDX[c] for c in hole2_strs]
+    board_idxs = [CARD_IDX[c] for c in board_strs]
+    dead_idxs = set(hole_idxs + board_idxs)
+    if my_discard_str:
+        dead_idxs.add(CARD_IDX[my_discard_str])
+    opp_disc_idx = CARD_IDX[opp_discard_str] if opp_discard_str else None
+    if opp_disc_idx is not None:
+        dead_idxs.add(opp_disc_idx)
+
+    rem_deck = [i for i in range(52) if i not in dead_idxs]
+    n_rem = len(rem_deck)
+    b0, b1, b2, b3, b4 = board_idxs[0], board_idxs[1], board_idxs[2], board_idxs[3], board_idxs[4]
+    my_score = eval7_idx((hole_idxs[0], hole_idxs[1], b0, b1, b2, b3, b4))
+
+    opp_disc_rank = CARD_RANK[opp_disc_idx] if opp_disc_idx is not None else 2
+    opp_disc_suit = CARD_SUIT[opp_disc_idx] if opp_disc_idx is not None else -1
+
+    alt_flop_score = {}
+    if opp_disc_idx is not None:
+        for c in rem_deck:
+            alt_flop_score[c] = eval5_idx(c, opp_disc_idx, b0, b1, b2)
+
+    flop_suit_counts = [0, 0, 0, 0]
+    flop_suit_counts[CARD_SUIT[b0]] += 1
+    flop_suit_counts[CARD_SUIT[b1]] += 1
+    flop_suit_counts[CARD_SUIT[b2]] += 1
+
+    tau = max(0.15, disc_tau)
+    total_weight = 0.0
+    weighted_wins = 0.0
+
+    for i in range(n_rem):
+        opp0 = rem_deck[i]
+        r0 = CARD_RANK[opp0]
+        s0 = CARD_SUIT[opp0]
+        alt0 = alt_flop_score.get(opp0, 0)
+        for j in range(i + 1, n_rem):
+            opp1 = rem_deck[j]
+            r1 = CARD_RANK[opp1]
+            s1 = CARD_SUIT[opp1]
+
+            weight = 1.0
+            if opp_disc_idx is not None:
+                keep_flop_score = eval5_idx(opp0, opp1, b0, b1, b2)
+                max_alt = alt0 if alt0 >= alt_flop_score[opp1] else alt_flop_score[opp1]
+                has_draw = (s0 == s1 and flop_suit_counts[s0] >= 2)
+                if keep_flop_score < max_alt and not has_draw:
+                    cat_diff = (max_alt >> 20) - (keep_flop_score >> 20)
+                    if cat_diff >= 1:
+                        weight = math.exp(-min(6.0, cat_diff * 1.4 / tau))
+                    else:
+                        weight = math.exp(-min(4.0, 0.45 / tau))
+                else:
+                    weight = 1.30
+                if opp_disc_rank >= 11 and keep_flop_score < (1 << 20) and not has_draw:
+                    if (r0 if r0 >= r1 else r1) < opp_disc_rank:
+                        weight *= 0.15
+                if s0 == opp_disc_suit and s1 == opp_disc_suit:
+                    weight *= 0.30
+
+            if pre_w is not None and opp_disc_idx is not None:
+                weight *= pre_w(pre_strength_idx(opp0, opp1, opp_disc_idx))
+
+            opp_score = eval7_idx((opp0, opp1, b0, b1, b2, b3, b4))
+
+            if opp_range_bias > 0.05:
+                if opp_score >= (2 << 20):
+                    weight *= (1.0 + opp_range_bias * 2.0)
+                elif opp_score >= ((1 << 20) | (11 << 16)):
+                    weight *= (1.0 + opp_range_bias * 0.35)
+                elif opp_score >= (1 << 20):
+                    weight *= max(0.45, 1.0 - opp_range_bias * 0.50)
+                else:
+                    weight *= max(0.50, 1.0 - opp_range_bias * 0.25)
+            elif opp_range_bias < -0.05:
+                if opp_score < (1 << 20) | (10 << 12):
+                    weight *= (1.0 + abs(opp_range_bias) * 1.8)
+
+            total_weight += weight
+            if my_score > opp_score:
+                weighted_wins += weight
+            elif my_score == opp_score:
+                weighted_wins += 0.5 * weight
+
+    return weighted_wins / max(total_weight, 1e-9)
+
+
 # ---------------------------------------------------------------------------
 # EMBEDDED TRAINED NEURAL & RL POLICY WEIGHTS
 # ---------------------------------------------------------------------------
@@ -294,6 +387,8 @@ class LatentOpponentProfile:
 
         self.high_card_discards = 0
         self.total_discards = 0
+        self.disc_agree_k = 0
+        self.disc_agree_n = 0
         self.showdowns = 0
         self.showdown_bluffs = 0
 
@@ -617,6 +712,11 @@ class LatentOpponentProfile:
     def my_public_btn_open(self):
         return (self.my_btn_opens + 2.7) / (self.my_btn_hands + 6.0)
 
+    @property
+    def disc_tau(self):
+        g = (self.disc_agree_k + 1.5) / (self.disc_agree_n + 2.0)
+        return 0.15 + 3.0 * ((1.0 - g) ** 2)
+
     def classify(self):
         if self.hands_seen < 8:
             return "BALANCED"
@@ -724,6 +824,15 @@ class NeuralCFRBot:
         self.pend_river_est = None
 
         if went_sd and msg.get("opp_hole_cards"):
+            if self.opp_discard and len(msg.get("board", [])) >= 3:
+                o0, o1 = CARD_IDX[msg["opp_hole_cards"][0]], CARD_IDX[msg["opp_hole_cards"][1]]
+                od = CARD_IDX[self.opp_discard]
+                b0, b1, b2 = CARD_IDX[msg["board"][0]], CARD_IDX[msg["board"][1]], CARD_IDX[msg["board"][2]]
+                s_keep = eval5_idx(o0, o1, b0, b1, b2)
+                s_alt = max(eval5_idx(o0, od, b0, b1, b2), eval5_idx(o1, od, b0, b1, b2))
+                self.opp.disc_agree_n += 1
+                if s_keep >= s_alt:
+                    self.opp.disc_agree_k += 1
             opp_bet_late = any(
                 h["actor"] == "opp" and h["street"] in ("turn", "river") and h["action"] == "raise"
                 for h in hist
@@ -1060,15 +1169,26 @@ class NeuralCFRBot:
             else:
                 opp_bias = 0.16 if (to_call > 0 or opp_raised_us_flop) else 0.0
 
-            eq = post_discard_equity(
-                self.hole2,
-                board,
-                self.my_discard,
-                self.opp_discard,
-                opp_range_bias=opp_bias,
-                num_rollouts=rollouts,
-                pre_w=self.pre_w,
-            )
+            if street == "river":
+                eq = rl_exact_river_equity(
+                    self.hole2,
+                    board,
+                    self.my_discard,
+                    self.opp_discard,
+                    opp_range_bias=opp_bias,
+                    pre_w=self.pre_w,
+                    disc_tau=self.opp.disc_tau,
+                )
+            else:
+                eq = post_discard_equity(
+                    self.hole2,
+                    board,
+                    self.my_discard,
+                    self.opp_discard,
+                    opp_range_bias=opp_bias,
+                    num_rollouts=rollouts,
+                    pre_w=self.pre_w,
+                )
             inter = hole_interaction_level(self.hole2, board)
             full_cat = eval_cards(self.hole2, board) >> 20
             has_draw = has_strong_draw(self.hole2, board)
@@ -1153,40 +1273,8 @@ class NeuralCFRBot:
             if street == "turn" and inter == 1 and eq_adj < 0.66:
                 return {"type": "action", "action": "check"}
 
-            # Neural Counterfactual Multi-Sizing Value Selector (`OnlineResponseNet`):
-            emp_f = self.opp.fold_to_flop_bet if street == "flop" else self.opp.fold_to_turn_river_bet
-            if inter >= 3 and eq_adj >= 0.72:
-                streets_left = {"flop": 3, "turn": 2, "river": 1}[street]
-                geo_frac = geometric_bet_fraction(pot, eff_stack, streets_left)
-                base_frac = max(0.68, min(0.95, geo_frac))
-                if archetype == "CALLING_STATION":
-                    base_frac = max(base_frac, 0.90)
-                cand_fracs = (max(0.56, base_frac - 0.14), base_frac, min(1.08, base_frac + 0.14))
-                best_target = max(req["min_raise"], min(req["max_raise"], int(pot * base_frac)))
-                best_ev = -1e9
-                best_x = None
-                for cf in cand_fracs:
-                    t_amt = max(req["min_raise"], min(req["max_raise"], my_bet + max(2, int(pot * cf))))
-                    B = t_amt - my_bet
-                    if B <= 0:
-                        continue
-                    x_nn = self.nn.build_features(
-                        street_idx, B, pot, danger, self.opp.fold_to_bet,
-                        self.opp.fold_to_flop_bet, self.opp.fold_to_turn_river_bet,
-                        self.opp.postflop_agg_per_hand, self.opp.raise_my_bet_rate,
-                        self.opp.vpip, is_3bet_pot, opp_checked_street, self.opp.my_public_fold_to_bet,
-                    )
-                    pf, pc, pr, _, _ = self.nn.predict(x_nn, emp_f)
-                    eq_c = max(0.55, eq_adj - 0.12 * pf)
-                    ev_c = eq_c * (pot + 2.0 * B) - B
-                    ev_r = (eq_adj - 0.06) * (pot + 3.8 * B) - 1.9 * B
-                    ev_total = pf * pot + pc * ev_c + pr * ev_r
-                    if ev_total > best_ev:
-                        best_ev = ev_total
-                        best_target = t_amt
-                        best_x = x_nn
-                self.pending_nn_ref[0] = best_x
-                return {"type": "action", "action": "raise", "amount": best_target}
+            if street == "turn" and inter == 0 and not has_draw and not prev_checked_through and eq_adj < 0.66:
+                return {"type": "action", "action": "check"}
 
             val_thresh = P["val_eq_thresh"]
             if archetype == "CALLING_STATION":
@@ -1194,42 +1282,43 @@ class NeuralCFRBot:
             elif archetype == "TRAPPER" or freq_raiser:
                 val_thresh = 0.61
 
-            if eq_adj >= val_thresh:
-                if street == "river" and inter == 2 and danger >= 0.55 and eq_adj < 0.66 and archetype != "CALLING_STATION":
-                    return {"type": "action", "action": "check"}
-                if archetype == "CALLING_STATION":
-                    frac = 0.68
-                elif inter >= 2 and eq_adj >= 0.68:
-                    frac = P["strong_val_size"]
-                    if self.opp.faced_bet_postflop >= 6 and self.opp.opp_fold_scale < 0.78:
-                        frac = min(1.00, frac + 0.12)
-                else:
-                    frac = P["thin_val_size"]
-                target = max(req["min_raise"], min(req["max_raise"], int(pot * frac)))
-                return {"type": "action", "action": "raise", "amount": target}
+            if street == "river" and inter == 2 and danger >= 0.55 and eq_adj < 0.66 and archetype != "CALLING_STATION":
+                return {"type": "action", "action": "check"}
 
-            bluff_freq = 0.0
-            probe_frac = P["flop_probe_size"]
-            if not freq_raiser and archetype not in ("CALLING_STATION", "MANIAC", "TRAPPER"):
-                if street == "flop" and 0.32 <= eq_adj < val_thresh and not is_3bet_pot:
-                    if self.opp.faced_flop_bet >= 5 and self.opp.fold_to_flop_bet > 0.44:
-                        bluff_freq = P["flop_probe_freq_high"]
-                        probe_frac = 0.35
-                    elif eq_adj >= 0.38:
-                        bluff_freq = 0.52 if archetype == "NIT_TAG" else P["flop_probe_freq_base"]
-                        probe_frac = 0.36
-                elif street == "turn" and prev_checked_through and 0.30 <= eq_adj < val_thresh:
-                    bluff_freq = 0.48 if archetype == "NIT_TAG" else P["turn_float_freq"]
-                    probe_frac = 0.40
-            if bluff_freq > 0.0 and self.opp.faced_bet_postflop >= 6:
-                if self.opp.opp_fold_scale < 0.65:
-                    bluff_freq *= 0.45
-                elif self.opp.opp_fold_scale > 1.15:
-                    bluff_freq = min(0.85, bluff_freq + 0.14)
+            if eq_adj < val_thresh and (freq_raiser or is_3bet_pot or archetype in ("CALLING_STATION", "TRAPPER")):
+                return {"type": "action", "action": "check"}
 
-            if bluff_freq > 0 and random.random() < bluff_freq:
-                target = max(req["min_raise"], min(req["max_raise"], int(pot * probe_frac)))
-                return {"type": "action", "action": "raise", "amount": target}
+            # Unified OnlineResponseNet + opp_fold_scale Multi-Sizing EV Tree:
+            emp_f = self.opp.fold_to_flop_bet if street == "flop" else self.opp.fold_to_turn_river_bet
+            scale = max(0.35, min(1.85, self.opp.opp_fold_scale))
+            hyst = 0.04 * pot + (0.03 * pot if self.seat != "button" else 0.0)
+            ev_check = eq_adj * pot + hyst
+            best_ev = ev_check
+            best_target = None
+            best_x = None
+            for cf in (0.35, 0.52, 0.75, 1.00, 1.35):
+                t_amt = max(req["min_raise"], min(req["max_raise"], my_bet + max(2, int(pot * cf))))
+                B = t_amt - my_bet
+                if B <= 0:
+                    continue
+                x_nn = self.nn.build_features(
+                    street_idx, B, pot, danger, self.opp.fold_to_bet,
+                    self.opp.fold_to_flop_bet, self.opp.fold_to_turn_river_bet,
+                    self.opp.postflop_agg_per_hand, self.opp.raise_my_bet_rate,
+                    self.opp.vpip, is_3bet_pot, opp_checked_street, self.opp.my_public_fold_to_bet,
+                )
+                pf, pc, pr, _, _ = self.nn.predict(x_nn, emp_f)
+                pf_adj = max(0.03, min(0.88, pf * (0.45 + 0.55 * scale)))
+                eq_c = max(0.04, eq_adj - 0.16 * pf_adj) if eq_adj >= 0.45 else max(0.03, eq_adj * (1.0 - 0.30 * pf_adj))
+                ev_bet = pf_adj * pot + (1.0 - pf_adj) * (eq_c * (pot + 2.0 * B) - B)
+                if ev_bet > best_ev:
+                    best_ev = ev_bet
+                    best_target = t_amt
+                    best_x = x_nn
+
+            if best_target is not None:
+                self.pending_nn_ref[0] = best_x
+                return {"type": "action", "action": "raise", "amount": best_target}
 
             return {"type": "action", "action": "check"}
 

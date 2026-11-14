@@ -95,13 +95,14 @@ python3 Starter_Kit/run_tournament.py --round-robin \
 
 ## 4. Radical RL/ML Bot (`rl_bot/bot.py` — `NeuralCFRBot`)
 
-A standalone single-file RL/ML submission (`142.0 KB`, zero external dependencies, all trained weights embedded) trained strictly on diverse general-purpose poker archetypes (8 synthetic archetypes + 12 distinct bot architectures including CFR/GTO, MCTS, Bayesian EV, Bandit Meta, Kelly, Trapper, LAG, TAG, Overbettor, and Calling Station):
+A standalone single-file RL/ML submission (`145.2 KB`, zero external dependencies, all trained weights embedded) trained strictly on diverse general-purpose poker archetypes (8 synthetic archetypes + 12 distinct bot architectures including CFR/GTO, MCTS, Bayesian EV, Bandit Meta, Kelly, Trapper, LAG, TAG, Overbettor, and Calling Station):
 
-- **Dual-Head Neural Opponent Response Network (`OnlineResponseNet`, 14 → 8 → 2)**: Pre-trained over 40,000 multi-archetype transitions and updated live during matches via Momentum SGD.
+- **Dual-Head Neural Opponent Response Network (`OnlineResponseNet`, 14 → 8 → 2) & Unified Multi-Sizing EV Tree**: Pre-trained over 40,000 multi-archetype transitions and updated live on every postflop bet via Momentum SGD; evaluates `(0.35x, 0.52x, 0.75x, 1.00x, 1.35x)` pot sizings using `OnlineResponseNet` scaled by `opp_fold_scale` with positional check hysteresis.
+- **Online Boltzmann Discard-Consistency Posterior (`rl_exact_river_equity`)**: Tracks each opponent's showdown flop-discard rationality (`disc_agree_k / disc_agree_n`) to compute a continuous temperature `disc_tau` (`0.15 + 3.0 * (1 - g)^2`), replacing brittle binary discard weights with a smooth Boltzmann posterior over all 903 river opponent hands.
 - **Sizing-Conditioned Belief & Range Encoder**: Detects preflop open-sizing splits (`5` vs. `6` vs. `7+`) and postflop probe sizes (`<= 0.42x` pot), applies negative range bias (`-0.06`) against wide-VPIP (`> 70%`) aggressive opponents, and disguises our own Button opens.
-- **Size-Aware Fold Elasticity (`opp_fold_scale`) & Sticky-BB / MDF Defense**: Tracks expected equilibrium folds (`B / (pot + 2B)`) on every postflop bet to suppress bluffs and size up value against sticky callers, tightens OOP BB iso-raises (`0.68`) against sticky limpers, scales 3-bet defense by `pot_odds`, and anchors flop/turn/river pair defense to `pot_odds` against wide-VPIP aggressors.
+- **Size-Aware Fold Elasticity (`opp_fold_scale`) & Sticky-BB / MDF Defense**: Tracks expected equilibrium folds (`B / (pot + 2B)`) on every postflop bet to calibrate bluff/value EV, tightens OOP BB iso-raises (`0.68`) against sticky limpers, scales 3-bet defense by `pot_odds`, and anchors flop/turn/river pair defense to `pot_odds` against wide-VPIP aggressors.
 - **Positional & Draw Equity Realization Critic + Match-State Capped-Utility Shaping**: Adjusts Flop/Turn equity realization for IP/draws/3-bet SPR and shapes end-of-leg call margins around the tournament score cap.
-- **Online EXP3 Bandit Meta-Controller & Validation**: Regret-matched weighting across 4 strategic experts (`15.0/28` and `+19,162` net chips across 11,200 hands on 7 held-out opponents; cut `bot_panav.py` 4,000-hand deficit by `53.0%` from `-6,512` to `-3,063` and Stage 1 from `-2,417` to `-354` / `2.0/5` matches).
+- **Online EXP3 Bandit Meta-Controller & Validation**: Regret-matched weighting across 4 strategic experts (`18.0/28` = `64.3%` and `+3,489` capped net across 11,200 hands on 7 held-out opponents, including `3.0/4` vs `Starter_Kit/bot.py v9`; `5.0/7` = `71.4%`, `+782` raw net chips, and `5.0/5` Stage 1 `Score_cap = +1.0000` vs `bot_panav.py`; `#3` in 6-bot Seed 5000 Round-Robin).
 
 ```bash
 # Train Phase 1 neural nets + Phase 2 CEM-RL policy + build standalone rl_bot/bot.py
