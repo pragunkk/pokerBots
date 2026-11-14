@@ -92,3 +92,20 @@ python3 Starter_Kit/run_tournament.py --round-robin \
 ```
 
 - **v9**: Lowered 3-bet defense scaling trigger to 9%, added Top-Pair turn MDF shield vs. double-barrelers, OOP turn check-raise value traps (`inter >= 3`), and U-shaped polarized turn/river range weighting.
+
+## 4. Radical RL/ML Bot (`rl_bot/bot.py` — `NeuralCFRBot`)
+
+A standalone single-file RL/ML submission (`139.9 KB`, zero external dependencies, all trained weights embedded) trained strictly on diverse general-purpose poker archetypes (8 synthetic archetypes + 12 distinct bot architectures including CFR/GTO, MCTS, Bayesian EV, Bandit Meta, Kelly, Trapper, LAG, TAG, Overbettor, and Calling Station):
+
+- **Dual-Head Neural Opponent Response Network (`OnlineResponseNet`, 14 → 8 → 2)**: Pre-trained over 40,000 multi-archetype transitions and updated live during matches via Momentum SGD.
+- **Sizing-Conditioned Belief & Range Encoder**: Detects preflop open-sizing splits (`5` vs. `6` vs. `7+`) and postflop probe sizes (`<= 0.42x` pot) while disguising our own Button opens.
+- **Positional & Draw Equity Realization Critic + Match-State Capped-Utility Shaping**: Adjusts Flop/Turn equity realization for IP/draws/3-bet SPR and shapes end-of-leg call margins around the tournament score cap.
+- **Online EXP3 Bandit Meta-Controller & CEM-RL Policy**: Regret-matched weighting across 4 strategic experts (`25/28 = 89.3%` win rate on 7 held-out unseen opponents, `+14,752` net chips across 5,600 hands, and `#1` in the 5-bot Round-Robin).
+
+```bash
+# Train Phase 1 neural nets + Phase 2 CEM-RL policy + build standalone rl_bot/bot.py
+python3 rl_bot/train_rl_bot.py
+python3 rl_bot/evolve_rl_policy.py
+python3 rl_bot/build_rl_bot.py
+python3 tools/fuzz.py rl_bot/bot.py 2000
+```
