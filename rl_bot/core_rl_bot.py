@@ -893,7 +893,7 @@ class NeuralCFRBot:
         if self.opp.faced_preflop_steal >= 8 and self.opp.fold_to_steal < 0.18:
             open_thresh = max(open_thresh, 0.44)
             limp_thresh = 0.20
-        if self.seat != "button" and opp_bet <= 2 and self.opp.hands_seen >= 10 and self.opp.vpip > 0.72 and self.opp.fold_to_bet < 0.35:
+        if self.seat != "button" and opp_bet <= 2 and self.opp.opp_btn_hands >= 8 and self.opp.btn_open_rate < 0.32 and self.opp.vpip > 0.75:
             open_thresh = max(open_thresh, 0.68)
 
         # Sizing-Aware 3-Bet & BB Defense vs Wide Openers:
@@ -1049,7 +1049,10 @@ class NeuralCFRBot:
                 # Small-ball probe / river air stab (`0.35x-0.40x` pot): range is capped/bluff-heavy!
                 opp_bias = -0.12
             elif (self.opp.hands_seen >= 10 and self.opp.vpip > 0.70 and agg_postflop_opp) and to_call > 0 and not is_3bet_pot:
-                opp_bias = -0.06 if bet_to_pot_ratio < 1.05 else 0.02
+                if street == "river" and opp_bet_flop and opp_bet_turn:
+                    opp_bias = 0.08
+                else:
+                    opp_bias = -0.06 if bet_to_pot_ratio < 1.05 else 0.02
             elif agg_postflop_opp and to_call > 0 and not is_3bet_pot:
                 opp_bias = 0.04 if bet_to_pot_ratio < 0.72 else 0.10
             elif archetype == "NIT_TAG" and to_call > 0:
@@ -1219,8 +1222,8 @@ class NeuralCFRBot:
                     bluff_freq = 0.48 if archetype == "NIT_TAG" else P["turn_float_freq"]
                     probe_frac = 0.40
             if bluff_freq > 0.0 and self.opp.faced_bet_postflop >= 6:
-                if self.opp.opp_fold_scale < 0.78:
-                    bluff_freq *= 0.25
+                if self.opp.opp_fold_scale < 0.65:
+                    bluff_freq *= 0.45
                 elif self.opp.opp_fold_scale > 1.15:
                     bluff_freq = min(0.85, bluff_freq + 0.14)
 

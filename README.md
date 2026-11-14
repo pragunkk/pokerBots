@@ -101,7 +101,7 @@ A standalone single-file RL/ML submission (`142.0 KB`, zero external dependencie
 - **Sizing-Conditioned Belief & Range Encoder**: Detects preflop open-sizing splits (`5` vs. `6` vs. `7+`) and postflop probe sizes (`<= 0.42x` pot), applies negative range bias (`-0.06`) against wide-VPIP (`> 70%`) aggressive opponents, and disguises our own Button opens.
 - **Size-Aware Fold Elasticity (`opp_fold_scale`) & Sticky-BB / MDF Defense**: Tracks expected equilibrium folds (`B / (pot + 2B)`) on every postflop bet to suppress bluffs and size up value against sticky callers, tightens OOP BB iso-raises (`0.68`) against sticky limpers, scales 3-bet defense by `pot_odds`, and anchors flop/turn/river pair defense to `pot_odds` against wide-VPIP aggressors.
 - **Positional & Draw Equity Realization Critic + Match-State Capped-Utility Shaping**: Adjusts Flop/Turn equity realization for IP/draws/3-bet SPR and shapes end-of-leg call margins around the tournament score cap.
-- **Online EXP3 Bandit Meta-Controller & Validation**: Regret-matched weighting across 4 strategic experts (`18.0/28 = 64.3%` win rate and `+18,050` net chips across 11,200 hands on 7 held-out opponents; cut `bot_panav.py` 4,000-hand deficit from `-6,512` to `-3,794` and Stage 1 from `-2,417` to `-920`).
+- **Online EXP3 Bandit Meta-Controller & Validation**: Regret-matched weighting across 4 strategic experts (`15.0/28` and `+19,162` net chips across 11,200 hands on 7 held-out opponents; cut `bot_panav.py` 4,000-hand deficit by `53.0%` from `-6,512` to `-3,063` and Stage 1 from `-2,417` to `-354` / `2.0/5` matches).
 
 ```bash
 # Train Phase 1 neural nets + Phase 2 CEM-RL policy + build standalone rl_bot/bot.py
