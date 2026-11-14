@@ -2755,6 +2755,8 @@ class LatentOpponentProfile:
         self.postflop_calls_checks = 0
         self.faced_bet_postflop = 0
         self.folded_to_bet_postflop = 0
+        self.my_bet_exp_folds = 0.0
+        self.pending_exp_fold = 0.0
         self.faced_flop_bet = 0
         self.folded_to_flop_bet = 0
         self.faced_turn_river_bet = 0
@@ -2816,6 +2818,7 @@ class LatentOpponentProfile:
         self.opp_first_pre_tracked = False
         self.my_first_pre_tracked = False
         self.current_hand_opp_open_size = 0
+        self.pending_exp_fold = 0.0
         self.last_street_tracked = "preflop"
         self.processed_history_len = 0
 
@@ -2920,6 +2923,9 @@ class LatentOpponentProfile:
                             self.three_bets += 1
                         preflop_raises_seen += 1
                 else:
+                    if self.pending_exp_fold > 0.0 and action in ("fold", "call", "raise"):
+                        self.my_bet_exp_folds += self.pending_exp_fold
+                        self.pending_exp_fold = 0.0
                     if pending_nn_ref is not None and pending_nn_ref[0] is not None and action in ("fold", "call", "raise"):
                         if nn_model is not None:
                             nn_model.online_momentum_update(pending_nn_ref[0], action)
@@ -3037,6 +3043,10 @@ class LatentOpponentProfile:
                 r = sum(x[4] for x in self.recent_window) / r_faced
                 return 0.40 * g + 0.60 * r
         return g
+
+    @property
+    def opp_fold_scale(self):
+        return max(0.20, min(2.20, (self.folded_to_bet_postflop + 2.5) / (self.my_bet_exp_folds + 2.5)))
 
     @property
     def fold_to_flop_bet(self):
@@ -3308,7 +3318,12 @@ class NeuralCFRBot:
 
         if street == "preflop":
             return self._play_preflop_rl(req, archetype, exp_probs)
-        return self._play_postflop_rl(req, archetype, exp_probs, time_left)
+        res = self._play_postflop_rl(req, archetype, exp_probs, time_left)
+        if res.get("action") == "raise":
+            bet_sz = max(0, int(res.get("amount", 0)) - req["my_bet"])
+            if bet_sz > 0:
+                self.opp.pending_exp_fold = bet_sz / max(1.0, float(req["pot"] + 2.0 * bet_sz))
+        return res
 
     def _play_preflop_rl(self, req, archetype, exp_probs):
         legal = req["legal_actions"]
@@ -3354,10 +3369,15 @@ class NeuralCFRBot:
             call_raise_thresh = 0.35
             three_bet_val_thresh = 0.65
 
-        # Anti-3-Bet & Varshith 60%-Open-Switch Prevention:
+        # Anti-3-Bet & Sticky-BB / Varshith 60%-Open-Switch Prevention:
         if self.opp.faced_preflop_steal >= 6 and self.opp.three_bet_vs_open_rate > 0.115:
             open_thresh = max(open_thresh, P["btn_open_vs_3bet"])
             limp_thresh = 0.20
+        if self.opp.faced_preflop_steal >= 8 and self.opp.fold_to_steal < 0.18:
+            open_thresh = max(open_thresh, 0.44)
+            limp_thresh = 0.20
+        if self.seat != "button" and opp_bet <= 2 and self.opp.hands_seen >= 10 and self.opp.vpip > 0.72 and self.opp.fold_to_bet < 0.35:
+            open_thresh = max(open_thresh, 0.68)
 
         # Sizing-Aware 3-Bet & BB Defense vs Wide Openers:
         if self.seat != "button" and self.opp.opp_btn_hands >= 8 and self.opp.btn_open_rate > 0.56:
@@ -3418,7 +3438,8 @@ class NeuralCFRBot:
             if strength >= 0.80 and "raise" in legal:
                 target = min(req["max_raise"], max(req["min_raise"], opp_bet * 3))
                 return {"type": "action", "action": "raise", "amount": target}
-            if strength >= 0.49 or (self.seat == "button" and strength >= 0.46 and pot_odds <= 0.34):
+            req_def = max(0.49, pot_odds + 0.18) if opp_bet >= 18 else 0.49
+            if strength >= req_def or (self.seat == "button" and opp_bet < 18 and strength >= 0.46 and pot_odds <= 0.34):
                 return {"type": "action", "action": "call"}
             return {"type": "action", "action": "fold"}
 
@@ -3510,8 +3531,10 @@ class NeuralCFRBot:
             elif to_call > 0 and bet_to_pot_ratio <= 0.43 and not is_3bet_pot:
                 # Small-ball probe / river air stab (`0.35x-0.40x` pot): range is capped/bluff-heavy!
                 opp_bias = -0.12
+            elif (self.opp.hands_seen >= 10 and self.opp.vpip > 0.70 and agg_postflop_opp) and to_call > 0 and not is_3bet_pot:
+                opp_bias = -0.06 if bet_to_pot_ratio < 1.05 else 0.02
             elif agg_postflop_opp and to_call > 0 and not is_3bet_pot:
-                opp_bias = 0.06 if bet_to_pot_ratio < 0.72 else 0.16
+                opp_bias = 0.04 if bet_to_pot_ratio < 0.72 else 0.10
             elif archetype == "NIT_TAG" and to_call > 0:
                 opp_bias = 0.24
             else:
@@ -3658,6 +3681,8 @@ class NeuralCFRBot:
                     frac = 0.68
                 elif inter >= 2 and eq_adj >= 0.68:
                     frac = P["strong_val_size"]
+                    if self.opp.faced_bet_postflop >= 6 and self.opp.opp_fold_scale < 0.78:
+                        frac = min(1.00, frac + 0.12)
                 else:
                     frac = P["thin_val_size"]
                 target = max(req["min_raise"], min(req["max_raise"], int(pot * frac)))
@@ -3676,6 +3701,11 @@ class NeuralCFRBot:
                 elif street == "turn" and prev_checked_through and 0.30 <= eq_adj < val_thresh:
                     bluff_freq = 0.48 if archetype == "NIT_TAG" else P["turn_float_freq"]
                     probe_frac = 0.40
+            if bluff_freq > 0.0 and self.opp.faced_bet_postflop >= 6:
+                if self.opp.opp_fold_scale < 0.78:
+                    bluff_freq *= 0.25
+                elif self.opp.opp_fold_scale > 1.15:
+                    bluff_freq = min(0.85, bluff_freq + 0.14)
 
             if bluff_freq > 0 and random.random() < bluff_freq:
                 target = max(req["min_raise"], min(req["max_raise"], int(pot * probe_frac)))
@@ -3789,29 +3819,31 @@ class NeuralCFRBot:
                     return {"type": "action", "action": "raise", "amount": amt}
 
         # 4. Structural Defense Against Flop, Turn & River Bets:
+        wide_agg = agg_postflop_opp and self.opp.vpip > 0.68
         if street == "flop":
             if inter == 0 and not has_draw:
                 if (bet_to_pot_ratio >= 0.38 or is_3bet_pot) and eq_adj < max(0.55, pot_odds + 0.12):
                     return {"type": "action", "action": "fold"}
             if inter == 1 and not has_draw:
-                if (bet_to_pot_ratio >= 0.64 or is_3bet_pot) and eq_adj < 0.46:
+                flop_fold_eq = (pot_odds + 0.03) if (agg_postflop_opp or self.opp.vpip > 0.68) else 0.46
+                if (bet_to_pot_ratio >= 0.64 or is_3bet_pot) and eq_adj < flop_fold_eq:
                     return {"type": "action", "action": "fold"}
 
         if street == "river":
             if inter == 0 and to_call > pot * 0.16:
                 return {"type": "action", "action": "fold"}
-            if to_call >= 60 and bet_to_pot_ratio >= 0.85 and inter <= 2 and eq_adj < 0.84 and self.opp.showdown_bluff_rate < 0.35:
+            if to_call >= 60 and bet_to_pot_ratio >= 0.85 and inter <= 2 and eq_adj < (pot_odds + 0.12 if wide_agg else 0.84) and self.opp.showdown_bluff_rate < 0.35:
                 return {"type": "action", "action": "fold"}
             inter1_lim = 0.38 if (prev_checked_through or agg_postflop_opp) else 0.26
-            inter1_eq_req = 0.56 if (prev_checked_through and agg_postflop_opp) else 0.66
+            inter1_eq_req = (pot_odds + 0.06) if wide_agg else (0.56 if (prev_checked_through and agg_postflop_opp) else 0.66)
             if inter == 1 and (to_call > pot * inter1_lim or (opp_was_prev_aggressor and not agg_postflop_opp)) and eq_adj < inter1_eq_req:
                 return {"type": "action", "action": "fold"}
-            if opp_bet_flop and opp_bet_turn and bet_to_pot_ratio >= 0.48 and self.opp.river_barrel_rate < 0.48:
+            if opp_bet_flop and opp_bet_turn and bet_to_pot_ratio >= 0.48 and self.opp.river_barrel_rate < 0.48 and not wide_agg:
                 if inter <= 2 and eq_adj < 0.58:
                     return {"type": "action", "action": "fold"}
-            if bet_to_pot_ratio >= 0.75 and to_call >= 25 and inter <= 2 and eq_adj < 0.82 and self.opp.showdown_bluff_rate < 0.30:
+            if bet_to_pot_ratio >= 0.75 and to_call >= 25 and inter <= 2 and eq_adj < (pot_odds + 0.10 if wide_agg else 0.82) and self.opp.showdown_bluff_rate < 0.30:
                 return {"type": "action", "action": "fold"}
-            if bet_to_pot_ratio >= 0.72 and self.opp.river_barrel_rate < 0.48:
+            if bet_to_pot_ratio >= 0.72 and self.opp.river_barrel_rate < 0.48 and not wide_agg:
                 if inter <= 2 and eq_adj < 0.76:
                     return {"type": "action", "action": "fold"}
                 if inter == 3 and full_cat == 2 and (danger >= 0.40 or board_is_paired) and eq_adj < 0.76:
@@ -3825,11 +3857,11 @@ class NeuralCFRBot:
             if inter == 1 and not has_draw:
                 if is_3bet_pot and bet_to_pot_ratio >= 0.42 and eq_adj < 0.62:
                     return {"type": "action", "action": "fold"}
-                turn_inter1_eq = P["turn_inter1_mdf_eq"] if agg_postflop_opp else 0.63
+                turn_inter1_eq = max(pot_odds + 0.04, 0.44) if wide_agg else (P["turn_inter1_mdf_eq"] if agg_postflop_opp else 0.63)
                 turn_ratio_lim = 0.68 if agg_postflop_opp else 0.55
                 if (bet_to_pot_ratio >= turn_ratio_lim or (opp_was_prev_aggressor and not agg_postflop_opp)) and eq_adj < turn_inter1_eq:
                     return {"type": "action", "action": "fold"}
-            if bet_to_pot_ratio >= 0.80 and (inter <= 1 or (inter == 2 and not agg_postflop_opp)) and eq_adj < 0.68:
+            if bet_to_pot_ratio >= 0.80 and not wide_agg and (inter <= 1 or (inter == 2 and not agg_postflop_opp)) and eq_adj < 0.68:
                 return {"type": "action", "action": "fold"}
 
         # 5. Raise for Value (when facing an opening bet, my_bet == 0)
