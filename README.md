@@ -1,113 +1,69 @@
-# Discard Hold'em - Adaptive Meta-Bot 
+# Discard Hold'em: Adaptive Bot (v10)
 
-Flagship bot and tournament testing suite for the **Pokerbots Discard Hold'em Hackathon** (Python 3.11 standard library only, official Two-Leg duplicate match format).
+Our submission for the **Pokerbots Discard Hold'em** competition. Python 3.11, standard library only, two-leg duplicate match format.
 
-## 1. Project Structure
+**Submitted file:** `Starter_Kit/bot.py` (v10, SHA-256 starts `afb6fd339b03ef77`). It is generated from three source files by `tools/build_bot.py`. Never edit it by hand.
+
+## Project structure
 
 ```text
 pokerBots/
 ├── Starter_Kit/
-│   ├── bot.py                # Standalone single-file tournament submission (built via tools/build_bot.py)
-│   ├── adaptive_bot.py       # Core AdaptiveBot v8 strategy, street-level profiler & RangeWeight engine
-│   ├── fast_eval.py          # Startup O(1) POW5/Bitmask 5/6/7-card evaluator, discard optimizer & exact river solver
-│   ├── preflop_table.py      # Precomputed lookup table for all 1,755 canonical 3-card preflop classes
-│   ├── engine.py             # Official Two-Leg match runner (Stage 1 = 400 hands, Stage 2 = 1,000 hands)
-│   ├── run_tournament.py     # Head-to-head series, Round-Robin, and Swiss tournament runner
-│   └── example_bots/         # 28 internal sparring bots (GTO/CFR, Bayesian, heuristics & version mirrors)
-├── spar/
-│   ├── spar_bot.py           # Complementary ML + Quantile-Bayesian EV sparring bot (2-layer NN + online SGD)
-│   ├── train_ml_spar.py      # Pure-Python trainer for the 12-feature postflop neural response model
-│   └── ml_weights.json       # Pre-trained weights for the neural response model
-├── champions/                # Frozen historical flagship checkpoints (v5.py, v6.py, v6_2.py, v7.py, v8.py)
-├── opponentBots/             # Practice bots from other teams (bots_Bhavesh.py, bot_Varshith.py, cfr_nash_bot.py)
-├── tools/
-│   ├── build_bot.py          # Bundles preflop_table.py + fast_eval.py + adaptive_bot.py -> Starter_Kit/bot.py
-│   ├── benchmark_opponent.py # Runs Stage 1 + Stage 2 matches vs any bot and outputs a Markdown forensics report
-│   ├── h2h.py                # Fast parallel head-to-head evaluator with mean ± standard error verdict
-│   ├── gauntlet.py           # Runs a bot against all internal bots in Starter_Kit/example_bots/
-│   ├── fuzz.py               # Stress-tests a bot with random game states to verify 0 crashes/illegal actions
-│   └── gen_preflop.py        # Offline generator for the 1,755-class preflop equity table
-├── reports/                  # Generated tournament benchmark & street-level forensics reports
-└── docs/                     # Official problemStatement.pdf, ruleBook.pdf, and protocol.pdf
+│   ├── bot.py              # Single-file submission (generated, do not edit)
+│   ├── adaptive_bot.py     # Strategy: preflop, postflop, discard, opponent profiler
+│   ├── fast_eval.py        # Lookup-table 5/6/7-card evaluator, equity and range functions
+│   ├── preflop_table.py    # Strength table for all 1,755 canonical 3-card hands
+│   ├── engine.py           # Official two-leg match runner (from the organisers)
+│   ├── run_tournament.py   # Round-robin / Swiss runner for local testing
+│   └── example_bots/       # Our own sparring bots, version mirrors, chaos and probe bots
+├── spar/                   # Our ML sparring bot used for testing
+├── champions/              # Frozen versions: v6_2, v7, v8, v9, v10
+├── tools/                  # Build, test and benchmark scripts (see below)
+├── reports/                # Benchmark reports
+└── docs/                   # Official problem statement, rulebook, protocol
 ```
 
-## 2. Flagship Bot Strategy (`Starter_Kit/bot.py` — `v8`)
+## How the bot plays
 
-Our flagship bot (**Adaptive Meta-Bot v8**) combines teammate `v7`'s soft preflop range-weighting engine with sparring-driven structural upgrades:
+1. **Preflop:** 3-card hand strength from `preflop_table.py`, with position-aware opening, defending and 3-bet thresholds adjusted to the opponent's measured frequencies.
+2. **Discard:** Monte-Carlo equity of each 2-card keep against the opponent's likely holdings on the flop.
+3. **Opponent range model:** once the opponent discards, all 3 of their starting cards are known for each candidate hand. Each candidate is weighted by how consistent it is with their discard and with their preflop line (open, 3-bet, call, limp), using their own measured frequencies.
+4. **Equity:** exact enumeration of every opponent hand on the river, and Monte-Carlo on the flop and turn, scaled to the time bank.
+5. **Facing bets:**
+   - Very large turn/river bets (1.1× pot or more) are compared against the strongest slice of the opponent's range, with the slice size and bluff share learned per opponent.
+   - Small bets (34% of the pot or less) are decided on price: equity against pot odds.
+6. **Safety:** every message handler is wrapped in try/except, every raise is clamped to the legal range, and errors go to stderr only. A bug costs at most one hand, never the match.
 
-1. **Startup $O(1)$ Lookup-Table Hand Evaluator (`fast_eval.py`)**:
-   - Precomputes `NON_FLUSH_LUT`, `FLUSH_BIT_LUT`, `N6`, `N7`, `FL`, and `FSUIT` using base-5 rank multisets (`POW5`) and 16-bit suit counters (`SUITADD`) during the free 5s startup window.
-   - Evaluates any 5-, 6-, or 7-card hand in $O(1)$ time (`< 1.4ms` max decision latency, `~0.45s` per 400-hand Stage 1 match), enabling high-precision Flop (`520` rollouts) and Turn (`720` rollouts) Monte Carlo simulations alongside a zero-variance 903-hand exact combinatorial river solver.
-2. **Soft Sigmoid Preflop Range Weighting (`RangeWeight` & `strength_quantile`)**:
-   - Precomputes the exact strength distribution of all $\binom{52}{3} = 22,100$ starting hands during `init` and maps the opponent's measured preflop frequencies (`btn_open_rate`, `pfr`, `three_bet_vs_open_rate`, `fold_to_steal`) to smooth double-logistic lower (`lo`) and upper (`hi`, capped-range) weights on their 3-card holding `(opp0, opp1, opp_discard)`.
-3. **True 8-Out Straight Draw Filter & Out-of-Position Flop Donk-Bet Guard**:
-   - Distinguishes genuine 8-out open-ended and double-gutshot straight draws from 4-out single gutshots in `has_strong_draw`, eliminating loose flop calls with bare 4-out gutshots that previously folded on the turn.
-   - Prevents out-of-position flop donk-betting (`self.seat == "big_blind"` and `opp_was_prev_aggressor`) with bluffs and medium 1-pair hands into the Button preflop raiser, while preserving prior-street aggression memory (`opp_raised_us_flop`) on the Turn and River.
-4. **Street-Specific Flop Probe & MDF-Balanced Turn/River Defense**:
-   - Tracks `fold_to_flop_bet` and `turn_barrel_rate` independently of overall postflop aggression: targets fit-or-fold flop players (`fold_to_flop_bet > 44%`) with `0.35x` pot small-ball flop probes (`68%` frequency) without misclassifying active 3-bettors or turn barrelers (`turn_barrel_rate > 36%`) as passive `NIT_TAG`s.
-   - Folds bare One Pair / Overpair (`inter <= 2`) against massive river overbet jams (`to_call >= 60` and $\ge 0.85\times$ pot) while defending standard turn/river barrels at Minimum Defense Frequency (`< 42%` fold rate).
+## Version history (each measured head-to-head on fresh deals)
 
-## 3. How to Build, Run & Test
+| Version | Change | Result |
+| --- | --- | --- |
+| v6 | Exact river equity, time-scaled simulations | +30 ± 14 chips/match vs v5 (300 matches) |
+| v6.2 | Two-leg format fixes, tuning | +71 ± 27 vs v6 (120) |
+| v7 | Opponent hands weighted by their preflop line | +48 ± 10 vs v6.2 (540) |
+| v8 | Lookup-table evaluator, turn/river fixes | +82 ± 22 vs v7 (160) |
+| v9 | Learned defence against very large bets | vs spar bot: +391 vs +139 for v8 (100); +27 ± 12 vs v8 (200) |
+| v10 | Price floor for small bets | vs min-bet bot: +233 vs −57 for v9 (30); +9 ± 13 vs v9 (200) |
 
-Run all commands from the repository root:
+## Robustness (v10)
 
-### Build & Fuzz-Test `Starter_Kit/bot.py`
-Whenever you edit `preflop_table.py`, `fast_eval.py`, or `adaptive_bot.py`, rebuild the single-file submission and verify protocol safety:
-```bash
-python3 tools/build_bot.py
-python3 tools/fuzz.py Starter_Kit/bot.py 2000
-```
+- 10,000 fuzzed game states: 0 crashes, 0 illegal replies.
+- Protocol edge cases: all pass (all-ins, raise cap, junk input, missing fields, 40 ms time bank, clean exit).
+- Chaos opponent sending illegal moves and junk: 0 notices.
+- At most about 4 s of CPU per 500-hand leg (75 s allowed); about 34 MB of memory.
 
-### Play a Single Match (`engine.py`)
-```bash
-# Stage 1 Match (400 hands = 2 legs of 200 deals, 30s bank/leg, Cap C = 400)
-python3 Starter_Kit/engine.py Starter_Kit/bot.py spar/spar_bot.py
+## Build and test
 
-# Stage 2 Finals Match (1,000 hands = 2 legs of 500 deals, 75s bank/leg, Cap C = 1000)
-python3 Starter_Kit/engine.py Starter_Kit/bot.py opponentBots/bot_Varshith.py --stage 2
-```
-
-### Run Full Tournament Benchmarks with Forensics Table (`benchmark_opponent.py`)
-Runs 5 Stage-1 matches + 2 Stage-2 matches (4,000 hands total) in parallel and outputs match tables + street-by-street forensics:
-```bash
-python3 tools/benchmark_opponent.py Starter_Kit/bot.py spar/spar_bot.py --output-md reports/benchmark_vs_SparBot.md
-python3 tools/benchmark_opponent.py Starter_Kit/bot.py opponentBots/bot_Varshith.py --output-md reports/benchmark_vs_Varshith.md
-python3 tools/benchmark_opponent.py Starter_Kit/bot.py opponentBots/bots_Bhavesh.py --output-md reports/benchmark_vs_Bhavesh.md
-```
-
-### Run Head-to-Head (`h2h.py`), Gauntlet (`gauntlet.py`), or Multi-Bot Tournaments (`run_tournament.py`)
-```bash
-# Fast parallel head-to-head over N seeds with statistical significance verdict
-python3 tools/h2h.py Starter_Kit/bot.py champions/v7.py 50
-
-# Gauntlet against all internal example bots
-python3 tools/gauntlet.py Starter_Kit/bot.py --seeds 4
-
-# Round-Robin or Swiss tournament across multiple bots
-python3 Starter_Kit/run_tournament.py --round-robin \
-  Starter_Kit/bot.py \
-  spar/spar_bot.py \
-  opponentBots/bot_Varshith.py \
-  opponentBots/bots_Bhavesh.py
-```
-
-- **v9**: Lowered 3-bet defense scaling trigger to 9%, added Top-Pair turn MDF shield vs. double-barrelers, OOP turn check-raise value traps (`inter >= 3`), and U-shaped polarized turn/river range weighting.
-
-## 4. Radical RL/ML Bot (`rl_bot/bot.py` — `NeuralCFRBot`)
-
-A standalone single-file RL/ML submission (`145.2 KB`, zero external dependencies, all trained weights embedded) trained strictly on diverse general-purpose poker archetypes (8 synthetic archetypes + 12 distinct bot architectures including CFR/GTO, MCTS, Bayesian EV, Bandit Meta, Kelly, Trapper, LAG, TAG, Overbettor, and Calling Station):
-
-- **Dual-Head Neural Opponent Response Network (`OnlineResponseNet`, 14 → 8 → 2) & Unified Multi-Sizing EV Tree**: Pre-trained over 40,000 multi-archetype transitions and updated live on every postflop bet via Momentum SGD; evaluates `(0.35x, 0.52x, 0.75x, 1.00x, 1.35x)` pot sizings using `OnlineResponseNet` scaled by `opp_fold_scale` with positional check hysteresis.
-- **Online Boltzmann Discard-Consistency Posterior (`rl_exact_river_equity`)**: Tracks each opponent's showdown flop-discard rationality (`disc_agree_k / disc_agree_n`) to compute a continuous temperature `disc_tau` (`0.15 + 3.0 * (1 - g)^2`), replacing brittle binary discard weights with a smooth Boltzmann posterior over all 903 river opponent hands.
-- **Sizing-Conditioned Belief & Range Encoder**: Detects preflop open-sizing splits (`5` vs. `6` vs. `7+`) and postflop probe sizes (`<= 0.42x` pot), applies negative range bias (`-0.06`) against wide-VPIP (`> 70%`) aggressive opponents, and disguises our own Button opens.
-- **Size-Aware Fold Elasticity (`opp_fold_scale`) & Sticky-BB / MDF Defense**: Tracks expected equilibrium folds (`B / (pot + 2B)`) on every postflop bet to calibrate bluff/value EV, tightens OOP BB iso-raises (`0.68`) against sticky limpers, scales 3-bet defense by `pot_odds`, and anchors flop/turn/river pair defense to `pot_odds` against wide-VPIP aggressors.
-- **Positional & Draw Equity Realization Critic + Match-State Capped-Utility Shaping**: Adjusts Flop/Turn equity realization for IP/draws/3-bet SPR and shapes end-of-leg call margins around the tournament score cap.
-- **Online EXP3 Bandit Meta-Controller & Validation**: Regret-matched weighting across 4 strategic experts (`18.0/28` = `64.3%` and `+3,489` capped net across 11,200 hands on 7 held-out opponents, including `3.0/4` vs `Starter_Kit/bot.py v9`; `5.0/7` = `71.4%`, `+782` raw net chips, and `5.0/5` Stage 1 `Score_cap = +1.0000` vs `bot_panav.py`; `#3` in 6-bot Seed 5000 Round-Robin).
+Run from the repository root with Python 3.11:
 
 ```bash
-# Train Phase 1 neural nets + Phase 2 CEM-RL policy + build standalone rl_bot/bot.py
-python3 rl_bot/train_rl_bot.py
-python3 rl_bot/evolve_rl_policy.py
-python3 rl_bot/build_rl_bot.py
-python3 tools/fuzz.py rl_bot/bot.py 2000
+python3.11 tools/build_bot.py                                   # rebuild Starter_Kit/bot.py from the sources
+python3.11 tools/final_check.py                                 # one-command pre-submission check (all must PASS)
+python3.11 tools/fuzz.py Starter_Kit/bot.py 5000                # random-state crash test
+python3.11 tools/edge_test.py Starter_Kit/bot.py                # protocol edge cases
+python3.11 tools/h2h.py Starter_Kit/bot.py champions/v9.py 300  # head-to-head with standard error
+python3.11 tools/gauntlet.py Starter_Kit/bot.py --seeds 4       # vs every bot in example_bots/
+python3.11 Starter_Kit/engine.py Starter_Kit/bot.py spar/spar_bot.py --stage 2   # single match
 ```
+
+A change is kept only if `h2h` against the current champion reports **REAL improvement** and `final_check.py` passes.
