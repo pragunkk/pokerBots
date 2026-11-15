@@ -1,4 +1,4 @@
-# Discard Hold'em — Adaptive Meta-Bot (`v8`)
+# Discard Hold'em - Adaptive Meta-Bot 
 
 Flagship bot and tournament testing suite for the **Pokerbots Discard Hold'em Hackathon** (Python 3.11 standard library only, official Two-Leg duplicate match format).
 
